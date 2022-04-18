@@ -1,27 +1,22 @@
-# Frobnicator
+# clingy
 
-## Autorzy
-- Andrzej Głuszak (gr 9, @agluszak na githubie)
-- Linus Torvalds (Uniwersytet Helsiński, @torvalds na githubie)
+## Authors
+- Przemysław Kusiak (group 9)
 
-## Opis
-Od zawsze chcieliśmy napisać grę komputerową.
-Frobnicator będzie to gra platformowa, w której chodzi o to, żeby...
+## Description
+Clingy is a simple linker that takes the ELF object files and creates ELF
+executable.
 
-Z grubsza będziemy wzorować się na [tym tutorialu](https://dev.to/sbelzile/rust-platformer-part-1-bevy-and-ecs-2pci).
+I will use material covered in [this book](https://en.1lib.pl/book/2705753/494de3)
+and maybe some other tutorials (I will add them here as a reference).
 
-## Funkcjonalność
-- Generowanie map
-- Strzelanie
-- AI dla wrogów (bardziej rozbudowane niż w tutorialu)
-- Możliwość zapisywania i wczytywania stanu gry
-- Punktacja
+## Functionality
+- Takes several object files and creates an executable file (does the whole
+  symbol resolution and relocation thing, etc.).
+- Works only on `x86_64` Linux.
 
-## Propozycja podziału na części
-W pierwszej części stworzymy grę opartą na tutorialu (z lepszym AI) i jedną zahardcodowaną planszą.
+Right now it's hard for me to estimate how complex the project implementing
+these functionalities will turn out to be (I'm still learning about linkers).
 
-W drugiej części dodamy do tego losowy generator map, zapisywanie/wczytywanie stanu gry oraz system punktacji.
+If that's not enough, I'll add something.
 
-## Biblioteki
-- Bevy
-- może coś do serializacji danych? (czy mógłby Pan coś polecić?)
