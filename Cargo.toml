@@ -1,0 +1,11 @@
+[package]
+name = "project-clingy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+memmap = ">= 0.7.0"
+bytemuck = ">= 1.9.1"
+bytemuck_derive = ">= 1.1.0"
+dashmap = ">= 5.3.4"
+globset = ">= 0.4.8"
