@@ -3,11 +3,11 @@
 #![feature(mixed_integer_ops)]
 use bytemuck::Pod;
 use bytemuck_derive::{Pod, Zeroable};
-use memmap::Mmap;
+use rayon::iter::IndexedParallelIterator;
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
 use std::ffi::CStr;
-use std::io::{Error, ErrorKind};
-
-use std::io::Result as IoResult;
+use std::io::{Error, ErrorKind, Read, Result as IoResult, Seek, SeekFrom, Write};
 
 /* 1. In-file data structures
  *
@@ -19,23 +19,18 @@ use std::io::Result as IoResult;
  * zero-copy solutions and, as far as I know, on modern CPUs unaligned access comes with little or
  * no penalty anyway.
  *
- * To read data from file, `memmap` crate is used to map an input file into read-only [u8] block.
- * `mmap` is amazing system call with great optimizations underneath, but it is unsafe. The file
- * may be modified outside of the process - Linux for example do not have mandatory file locks.
- * Then the page consisting of the mmaped file may be evicted. Then the page may be re-read with
- * different content, causing the read-only mapped region to mutate 😱. I hope that safety of
- * `mmap` will be improved someday. For now, I will take the risk.
- *
- * To write data to file, regular Rust API from std::io is used (File, Write, etc.).
+ * To read and write data, regular Rust API from std::io is used (File, Write, etc.).
  */
 
+#[derive(Debug)]
 struct ElfFileContent {
-    content: Mmap,
+    content: Vec<u8>,
 }
 
 impl ElfFileContent {
-    fn map(file: std::fs::File) -> IoResult<Self> {
-        let content = unsafe { Mmap::map(&file)? };
+    fn read(file: &mut std::fs::File) -> IoResult<Self> {
+        let mut content = Vec::new();
+        file.read_to_end(&mut content)?;
         let file = ElfFileContent { content };
         file.get_elf_header()?.verify()?;
         Ok(file)
@@ -106,27 +101,37 @@ struct ElfHeader {
     e_shstrndx: u16,
 }
 
+const ELF_IDENT_MAGIC: [u8; 4] = *b"\x7fELF";
+const ELF_IDENT_CLASS_X86_64: u8 = 2;
+const ELF_IDENT_ENDIANNESS_LITTLE: u8 = 1;
+const ELF_IDENT_HVERSION_CURRENT: u8 = 1;
+const ELF_IDENT_OSABI_SYSV: u8 = 0;
+const ELF_TYPE_RELOCATABLE: u16 = 1;
+const ELF_TYPE_EXECUTABLE: u16 = 2;
+const ELF_MACHINE_X86_64: u16 = 0x3E;
+const ELF_VERSION_CURRENT: u32 = 1;
+
 impl ElfHeader {
     fn verify(&self) -> IoResult<()> {
         let e = |desc| Err(Error::new(ErrorKind::InvalidData, desc));
 
         match true {
-            _ if &self.e_ident_magic != b"\x7fELF" => e("Bad magic. Not an ELF file?"),
-            _ if self.e_ident_class != 2 => {
+            _ if &self.e_ident_magic != &ELF_IDENT_MAGIC => e("Bad magic. Not an ELF file?"),
+            _ if self.e_ident_class != ELF_IDENT_CLASS_X86_64 => {
                 e("Bad file class. Was the object file built for x86_64 CPU?")
             }
-            _ if self.e_ident_endianness != 1 => {
+            _ if self.e_ident_endianness != ELF_IDENT_ENDIANNESS_LITTLE => {
                 e("Bad endianness. Was the object file built for x86_64 CPU?")
             }
-            _ if self.e_ident_hversion != 1 => {
+            _ if self.e_ident_hversion != ELF_IDENT_HVERSION_CURRENT => {
                 e("Unrecognized header version (should be 1). File corrupted?")
             }
-            _ if self.e_ident_osabi != 0 => {
+            _ if self.e_ident_osabi != ELF_IDENT_OSABI_SYSV => {
                 e("File is not a static relocatable file (.o) or is not compatible with Linux")
             }
-            _ if self.e_type != 1 => e("Not a relocatable (.o) file"),
-            _ if self.e_machine != 0x3E => e("File not built for x86_64 CPU"),
-            _ if self.e_version != 1 => {
+            _ if self.e_type != ELF_TYPE_RELOCATABLE => e("Not a relocatable (.o) file"),
+            _ if self.e_machine != ELF_MACHINE_X86_64 => e("File not built for x86_64 CPU"),
+            _ if self.e_version != ELF_VERSION_CURRENT => {
                 e("Unrecognized file version (should be 1). File corrupted?")
             }
             _ if self.e_shentsize < std::mem::size_of::<ElfSectionEntry>() as u16 => {
@@ -172,6 +177,27 @@ struct ElfSectionEntry {
     sh_info: u32,
     sh_addralign: u64,
     sh_entsize: u64,
+}
+
+const PT_NULL: u32 = 0; /* Program header table entry unused */
+const PT_LOAD: u32 = 1; /* Loadable program segment */
+
+const PF_EXEC: u32 = 1 << 0; /* Segment is executable */
+const PF_WRITE: u32 = 1 << 1; /* Segment is writable */
+const PF_READ: u32 = 1 << 2; /* Segment is readable */
+
+/* ELF program header entry. */
+#[derive(Copy, Clone, Zeroable, Pod, Debug)]
+#[repr(C, packed)]
+struct ElfProgramHeaderEntry {
+    p_type: u32,
+    p_flags: u32,
+    p_offset: ElfOffset,
+    p_vaddr: ElfAddr,
+    p_paddr: ElfAddr,
+    p_filesz: u64,
+    p_memsz: u64,
+    p_align: u64,
 }
 
 /* ELF .symtab entry. */
@@ -228,9 +254,10 @@ const R_X86_64_32S: u32 = 11; /* Direct 32 bit sign extended */
 /* TODO: support .rel entries. (They are abandoned now, everyone uses .rela, so it's not really
  * that important). */
 
+#[derive(Debug)]
 struct ElfStringTableAdapter<'a> {
     offset: u64,
-    size: u64,
+    end: u64,
     file: &'a ElfFileContent,
 }
 
@@ -241,8 +268,8 @@ impl<'a> ElfStringTableAdapter<'a> {
 
         if let SHT_STRTAB = entry.sh_type {
             Ok(ElfStringTableAdapter {
-                offset: entry.sh_addr,
-                size: entry.sh_size,
+                offset: entry.sh_offset,
+                end: entry.sh_offset + entry.sh_size,
                 file,
             })
         } else {
@@ -261,7 +288,7 @@ impl<'a> ElfStringTableAdapter<'a> {
         }
 
         let begin = self.offset as usize + position as usize;
-        let end = begin + self.size as usize;
+        let end = self.end as usize;
 
         let content = &self.file.content[begin..end];
 
@@ -274,6 +301,7 @@ impl<'a> ElfStringTableAdapter<'a> {
     }
 }
 
+#[derive(Debug)]
 struct ElfSymtabAdapter<'a> {
     file: &'a ElfFileContent,
     offset: u64,
@@ -335,9 +363,9 @@ struct ElfRelaAdapter<'a> {
     symtab: ElfSymtabAdapter<'a>,
 }
 
-//
-// TODO: This code is quite similar to code of ElfSymtabAdapter struct. Maybe abstract something?
-//
+/*
+ * TODO: This code is quite similar to code of ElfSymtabAdapter struct. Maybe abstract something?
+ */
 impl<'a> ElfRelaAdapter<'a> {
     pub fn adapt(section_num: ElfSectionIndex, file: &'a ElfFileContent) -> IoResult<Self> {
         let entry = file.get_section_entry(section_num)?;
@@ -420,10 +448,10 @@ const DEFAULT_SCHEME: LayoutScheme<'static> = LayoutScheme {
                     name: ".data",
                     inpsects: &[".data", ".data.*"],
                 },
-                OutSectScheme {
+                /*OutSectScheme {
                     name: ".bss",
                     inpsects: &[".bss", ".bss.*"],
-                },
+                },*/
             ],
         },
     ],
@@ -447,7 +475,6 @@ const DEFAULT_SCHEME: LayoutScheme<'static> = LayoutScheme {
  *   . = ALIGN(CONSTANT (MAXPAGESIZE));
  *   . = SEGMENT_START("data-segment", .);
  *   .data : { *(.data .data.*) }
- *   .bss : { *(.bss .bss.*) }
  * }
  *
  */
@@ -455,16 +482,19 @@ const DEFAULT_SCHEME: LayoutScheme<'static> = LayoutScheme {
 type FileIndex = u16;
 type SegmentIndex = u16;
 
+#[derive(Debug)]
 enum AddrScheme {
     CurrentLocation,
     Absolute(ElfAddr),
 }
 
+#[derive(Debug)]
 struct OutSectScheme<'a> {
     name: &'a str,
     inpsects: &'a [&'a str],
 }
 
+#[derive(Debug)]
 struct SegmentScheme<'a> {
     name: &'a str,     /* Segment name */
     start: AddrScheme, /* Starting address of segment */
@@ -472,6 +502,7 @@ struct SegmentScheme<'a> {
     sections: &'a [OutSectScheme<'a>],
 }
 
+#[derive(Debug)]
 struct LayoutScheme<'a> {
     entry: &'a str,
     segments: &'a [SegmentScheme<'a>],
@@ -507,8 +538,8 @@ impl<'a> LayoutScheme<'a> {
  *  some auxilary arrays to help us relocating.
  *
  *  For every file in parallel:
- *    *  We copy each InpSect that needs some relocations. We go through the .rela and .rel tables and,
- *       using hashtable and .symtab, we relocate.
+ *    *  We copy each InpSect that needs some relocations. We go through the .rela and .rel tables
+ *       and, using hashtable and .symtab, we relocate.
  *
  */
 
@@ -516,6 +547,7 @@ type OutSectIndex = u16;
 type InpSectIndex = u16;
 type OutSectMatchersVec = Vec<Vec<globset::GlobMatcher>>;
 
+#[derive(Debug)]
 struct Layout<'a> {
     scheme: &'a LayoutScheme<'a>,
     outsect_count: usize,
@@ -566,53 +598,67 @@ fn align(num: u64, bound: u64) -> u64 {
     ((num + (bound - 1)) / bound) * bound
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct InpSectFileMapping {
     outsect_num: OutSectIndex,
-    per_file_offset_in_outsect: u64,
+    inpsect_offset_in_outsect_file_part: u64,
 }
 
-/* This is per-file vector indexed by InpSectIndex */
+/* This is per-file vector indexed by InpSectIndex. Not every InpSect is mapped to output file. */
 type InpSectToOutSectVec = Vec<Option<InpSectFileMapping>>;
 
-/* This is per-file vector indexed by OutSectIndex */
-type OutSectPerFileOffsetsVec = Vec<u64>;
+/* This is per-file vector indexed by OutSectIndex. Some OutSects do not have corresponding InpSect
+ * in input file. */
+type OutSectPerFileOffsetsVec = Vec<Option<u64>>;
 
+/* This is per-file vector indexed by InpSectIndex. Not every InpSect is mapped to output file. */
+type InpSectToRelaVec = Vec<Option<ElfSectionIndex>>;
+
+#[derive(Debug)]
 struct PreprocessedFile<'a> {
     number: usize,
     content: ElfFileContent,
-    layout: &'a Layout<'a>,
+    layout: &'a Layout<'a>, /* TODO: is this field really needed? */
     symtab_index: InpSectIndex,
     inpsect_to_outsect: InpSectToOutSectVec,
+    inpsect_to_rela: InpSectToRelaVec,
     outsects_per_file_size: OutSectPerFileOffsetsVec,
 }
 
 impl<'a> PreprocessedFile<'a> {
-    fn new(file: std::fs::File, number: usize, layout: &'a Layout) -> IoResult<Self> {
-        let content = ElfFileContent::map(file)?;
+    fn new(file: &mut std::fs::File, number: usize, layout: &'a Layout) -> IoResult<Self> {
+        let content = ElfFileContent::read(file)?;
         let mut symtab_index: Option<InpSectIndex> = None;
-        let mut inpsect_to_outsect: InpSectToOutSectVec = Vec::new();
-        let mut outsects_per_file_size: Vec<u64> = Vec::new();
-        outsects_per_file_size.resize(layout.outsect_count, 0);
+        let mut outsects_per_file_size: OutSectPerFileOffsetsVec = Vec::new();
+        outsects_per_file_size.resize(layout.outsect_count, None);
 
         let header = content.get_elf_header()?;
         let section_names = ElfStringTableAdapter::adapt(header.e_shstrndx, &content)?;
+        let sections_count = header.e_shnum as usize;
 
-        inpsect_to_outsect.resize(header.e_shnum as usize, None);
+        let mut inpsect_to_outsect: InpSectToOutSectVec = vec![None; sections_count];
+        let mut inpsect_to_rela: InpSectToRelaVec = vec![None; sections_count];
 
         let e = |desc| Err(Error::new(ErrorKind::Other, desc));
 
         let mut map_inpsect_to_outsect = |inpsect_idx, inpsect_size, outsect_num| {
+            if outsects_per_file_size[outsect_num as usize].is_none() {
+                outsects_per_file_size[outsect_num as usize] = Some(0)
+            }
+
+            let current_outsect_per_file_size =
+                outsects_per_file_size[outsect_num as usize].unwrap();
+
             /* TODO: Alignment. Right now we are aligning to the nearest multiple of 16. Use
              * real alignment field from InpSect. */
-            let offset_aligned = align(outsects_per_file_size[outsect_num as usize], 16);
+            let offset_aligned = align(current_outsect_per_file_size, 16);
 
             inpsect_to_outsect[inpsect_idx as usize] = Some(InpSectFileMapping {
                 outsect_num,
-                per_file_offset_in_outsect: offset_aligned + inpsect_size,
+                inpsect_offset_in_outsect_file_part: offset_aligned,
             });
 
-            outsects_per_file_size[outsect_num as usize] = offset_aligned + inpsect_size;
+            outsects_per_file_size[outsect_num as usize] = Some(offset_aligned + inpsect_size);
         };
 
         for section_idx in 0..header.e_shnum {
@@ -624,6 +670,20 @@ impl<'a> PreprocessedFile<'a> {
                     symtab_index = Some(section_idx)
                 } else {
                     return e("A file cannot contain more than one symbol table".to_string());
+                }
+            }
+
+            if let SHT_RELA = section.sh_type {
+                let entry = &mut inpsect_to_rela[section.sh_info as usize];
+
+                match entry {
+                    None => *entry = Some(section_idx),
+                    Some(_) => {
+                        return e(format!(
+                            "More than one relocation tables reference section '{}'",
+                            section_names.get(section.sh_name)?
+                        ))
+                    }
                 }
             }
 
@@ -654,6 +714,7 @@ impl<'a> PreprocessedFile<'a> {
             layout,
             symtab_index,
             inpsect_to_outsect,
+            inpsect_to_rela,
             outsects_per_file_size,
         })
     }
@@ -684,18 +745,38 @@ impl<'a> PreprocessedFile<'a> {
 
 type SymbolMap = dashmap::DashMap<String, Symbol>;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 enum SymbolVisibility {
     Strong,
     Weak,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct Symbol {
     outsect_num: u16,
     file_num: usize,
     outsect_offset: u64,
     visibility: SymbolVisibility,
+}
+
+impl Symbol {
+    fn get_symbol_address(&self, layout: &FinalLayout) -> u64 {
+        let Symbol {
+            outsect_num,
+            file_num,
+            outsect_offset, /* outsec_offset == symbol offset + insect offset in outsect file par */
+            visibility: _,
+        } = *self;
+
+        let outsect = layout.final_outsects[outsect_num as usize]
+            .as_ref()
+            .unwrap();
+
+        /* Address */
+        outsect.virtmem_address
+            + outsect.input_file_slots_offsets[file_num as usize]
+            + outsect_offset
+    }
 }
 
 struct InpSectRelativeAddress {
@@ -720,7 +801,7 @@ fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap) ->
 
         let symbol = Symbol {
             outsect_num: mapping.outsect_num,
-            outsect_offset: mapping.per_file_offset_in_outsect + symbol.st_value,
+            outsect_offset: mapping.inpsect_offset_in_outsect_file_part + symbol.st_value,
             file_num: file.number,
             visibility: symbol_visibility,
         };
@@ -737,7 +818,7 @@ fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap) ->
                 use SymbolVisibility::{Strong, Weak};
 
                 match (&entry.get().visibility, &symbol.visibility) {
-                    (Weak, Weak) => Ok(()), /* TODO: select bigger weak symbol (like other linkers) */
+                    (Weak, Weak) => Ok(()), /* TODO: select bigger weak symbol */
                     (Strong, Weak) => Ok(()),
                     (Weak, Strong) => {
                         entry.insert(symbol);
@@ -770,91 +851,137 @@ fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap) ->
     Ok(())
 }
 
-type OutSectsVirtMemAddress = Vec<u64>;
-type PerFileOutSectsOffset = Vec<Vec<u64>>;
-type OutSectsSize = Vec<u64>;
-
+#[derive(Debug)]
 struct FinalSegment {
-    virtmem_addr: u64,
-    virtmem_size: u64,
+    size: u64,
+    virtmem_address: u64,
+    offset_in_output_file: u64,
 }
 
+#[derive(Debug, Clone)]
+struct FinalOutSect {
+    size: u64,
+    input_file_slots_offsets: Vec<u64>,
+    virtmem_address: u64,
+    offset_in_output_file: u64,
+}
+
+#[derive(Debug)]
 struct FinalLayout<'a> {
     layout: &'a Layout<'a>,
-    final_segments: Vec<FinalSegment>,
-    outsects_virtmem_address: OutSectsVirtMemAddress,
-    per_file_outsects_offsets: PerFileOutSectsOffset,
-    outsects_size: OutSectsSize,
+    final_segments: Vec<Option<FinalSegment>>,
+    final_outsects: Vec<Option<FinalOutSect>>,
 }
 
 fn fix_layout<'a>(
     layout: &'a Layout<'a>,
-    preprocessed_files: Vec<&PreprocessedFile>,
+    preprocessed_files: &'a Vec<PreprocessedFile>,
 ) -> IoResult<FinalLayout<'a>> {
     let files_count = preprocessed_files.len();
+    let mut final_outsects = Vec::<_>::with_capacity(layout.outsect_count);
 
-    let mut outsects_size = vec![0; layout.outsect_count];
-    let mut per_file_outsects_offsets = vec![vec![0; layout.outsect_count]; files_count];
+    for outsect_num in 0..layout.outsect_count {
+        let is_present = preprocessed_files
+            .iter()
+            .any(|file| file.outsects_per_file_size[outsect_num].is_some());
 
-    for (outsect_num, cur_outsect_size) in outsects_size.iter_mut().enumerate() {
+        if !is_present {
+            final_outsects.push(None)
+        } else {
+            final_outsects.push(Some(FinalOutSect {
+                size: 0,
+                input_file_slots_offsets: vec![0; files_count],
+                virtmem_address: 0,
+                offset_in_output_file: 0,
+            }))
+        }
+    }
+
+    for (outsect_num, outsect) in final_outsects.iter_mut().enumerate() {
+        let mut outsect = match outsect {
+            None => continue,
+            Some(outsect) => outsect,
+        };
+
         let mut relative_offset: u64 = 0;
 
         for (file_num, file) in preprocessed_files.iter().enumerate() {
-            relative_offset = align(relative_offset, 16); // TODO: proper alignment
-            per_file_outsects_offsets[file_num][outsect_num] = relative_offset;
-            relative_offset += file.outsects_per_file_size[outsect_num];
+            relative_offset = align(relative_offset, 16); /* TODO: proper alignment */
+            outsect.input_file_slots_offsets[file_num as usize] = relative_offset;
+            relative_offset += file.outsects_per_file_size[outsect_num].unwrap_or(0);
         }
 
-        *cur_outsect_size = relative_offset;
+        outsect.size = relative_offset;
     }
 
-    let mut outsects_virtmem_address = vec![0; layout.outsect_count];
-    let mut final_segments = Vec::<FinalSegment>::new();
-    let mut address = 0x0;
+    let segment_count = layout.scheme.segments.len();
+    let mut final_segments = Vec::<_>::with_capacity(segment_count);
 
-    let mut outsects_iter = outsects_size
-        .iter()
-        .zip(outsects_virtmem_address.iter_mut());
+    let mut current_address = 0x0;
+    let mut current_offset_in_file = MAXPAGESIZE;
+
+    let mut outsects_iter = final_outsects.iter_mut();
 
     for segment in layout.scheme.segment_iter() {
-        address = match segment.start {
+        current_address = match segment.start {
             AddrScheme::Absolute(abs_address) => {
-                if address > abs_address {
+                if current_address > abs_address {
                     return Err(Error::new(
                         ErrorKind::FileTooLarge,
-                        "Cannot fit output files into LayoutScheme",
+                        format!(
+                            "Cannot fit OutSects into LayoutScheme (cannot fit OutSects below \
+                                 next OutSect {:#x} virtual address boundary)",
+                            abs_address
+                        ),
                     ));
                 }
                 abs_address
             }
-            AddrScheme::CurrentLocation => align(address, segment.alignment),
+            AddrScheme::CurrentLocation => align(current_address, segment.alignment),
         };
 
-        let segment_virtmem_start = address;
+        current_offset_in_file = align(current_offset_in_file, segment.alignment);
+
+        let virtmem_address = current_address;
+        let offset_in_output_file = current_offset_in_file;
+        let mut any_outsect_present_in_segment = false;
 
         for _ in segment.sections {
-            address = align(address, 16); // TODO: proper alignment
-            let (size, virtmem_address) = outsects_iter.next().unwrap();
-            *virtmem_address = address;
-            address += size;
+            let next_outsect = match outsects_iter.next() {
+                Some(Some(outsect)) => {
+                    any_outsect_present_in_segment = true;
+                    outsect
+                }
+                _ => continue,
+            };
+
+            current_address = align(current_address, 16); /* TODO: proper alignment */
+            current_offset_in_file = align(current_offset_in_file, 16); /* TODO: proper alignment */
+
+            next_outsect.virtmem_address = current_address;
+            next_outsect.offset_in_output_file = current_offset_in_file;
+
+            current_address += next_outsect.size;
+            current_offset_in_file += next_outsect.size;
         }
 
-        final_segments.push(FinalSegment {
-            virtmem_addr: segment_virtmem_start,
-            virtmem_size: address - segment_virtmem_start,
-        });
+        if any_outsect_present_in_segment {
+            final_segments.push(Some(FinalSegment {
+                size: current_offset_in_file - offset_in_output_file,
+                virtmem_address,
+                offset_in_output_file,
+            }));
+        } else {
+            final_segments.push(None);
+        }
     }
 
     Ok(FinalLayout {
         layout,
         final_segments,
-        outsects_virtmem_address,
-        per_file_outsects_offsets,
-        outsects_size,
+        final_outsects,
     })
 }
-
-type SectionFinalContent = Vec<u8>;
 
 trait WritePrimitive {
     fn write_ne_bytes<T: std::io::Write>(self, writer: &mut T) -> IoResult<()>;
@@ -872,14 +999,6 @@ impl WritePrimitive for i32 {
     }
 }
 
-struct RelocationData<'a> {
-    file: &'a PreprocessedFile<'a>,
-    inpsect_num: ElfSectionIndex,
-    global_map: &'a SymbolMap,
-    layout: &'a FinalLayout<'a>,
-    rela_index: ElfSectionIndex,
-}
-
 fn write_ne_at_pos<T, V>(pos: u64, val: T, writer: &mut V) -> IoResult<()>
 where
     T: WritePrimitive,
@@ -889,53 +1008,63 @@ where
     val.write_ne_bytes(writer)
 }
 
-impl<'a> RelocationData<'a> {
-    fn get_symbol_address(&self, symbol: Symbol) -> u64 {
-        let Symbol {
-            outsect_num,
-            file_num,
-            outsect_offset, /* outsec_offset == symbol offset + insect offset in per file outsect */
-            visibility: _,
-        } = symbol;
+type SectionContent = Vec<u8>;
 
-        /* Address */
-        self.layout.outsects_virtmem_address[outsect_num as usize]
-            + self.layout.per_file_outsects_offsets[file_num as usize][outsect_num as usize]
-            + outsect_offset
-    }
+struct SectionRelocationData<'a> {
+    file: &'a PreprocessedFile<'a>,
+    layout: &'a FinalLayout<'a>,
+    inpsect_num: u16,
+    rela_num: Option<u16>,
+    symbol_map: &'a SymbolMap,
+}
 
+impl<'a> SectionRelocationData<'a> {
     fn get_rela_address(&self, entry: &ElfRelaEntry, inpsect_num: u16) -> u64 {
-        let InpSectFileMapping {
-            outsect_num,
-            per_file_offset_in_outsect, /* TODO: refactoring: change this name to a more telling one */
-        } = self.file.inpsect_to_outsect[inpsect_num as usize]
-            .clone()
+        let mapping = self.file.inpsect_to_outsect[inpsect_num as usize]
+            .as_ref()
+            .unwrap();
+        let outsect = self.layout.final_outsects[mapping.outsect_num as usize]
+            .as_ref()
             .unwrap();
 
         /* Address */
-        self.layout.outsects_virtmem_address[outsect_num as usize]
-            + self.layout.per_file_outsects_offsets[self.file.number as usize][outsect_num as usize]
-            + per_file_offset_in_outsect
+        outsect.virtmem_address
+            + outsect.input_file_slots_offsets[self.file.number as usize]
+            + mapping.inpsect_offset_in_outsect_file_part
             + entry.r_offset
     }
 
-    fn relocate_section(&self) -> IoResult<SectionFinalContent> {
-        let RelocationData {
-            file,
-            inpsect_num,
-            global_map,
-            layout: _,
-            rela_index,
-        } = *self;
+    fn get_rela_offset(&self, entry: &ElfRelaEntry, inpsect_num: u16) -> u64 {
+        let mapping = self.file.inpsect_to_outsect[inpsect_num as usize]
+            .as_ref()
+            .unwrap();
+        let outsect = self.layout.final_outsects[mapping.outsect_num as usize]
+            .as_ref()
+            .unwrap();
 
-        let rela = ElfRelaAdapter::adapt(rela_index, &file.content)?;
-        let section = file.content.get_section_entry(inpsect_num)?;
+        /* Offset */
+        outsect.offset_in_output_file
+            + outsect.input_file_slots_offsets[self.file.number as usize]
+            + mapping.inpsect_offset_in_outsect_file_part
+            + entry.r_offset
+    }
+
+    fn relocate_section(&self) -> IoResult<SectionContent> {
+        let section = self.file.content.get_section_entry(self.inpsect_num)?;
 
         let offset_begin = section.sh_offset as usize;
         let offset_end = offset_begin + section.sh_size as usize;
 
-        let section_copy: Vec<u8> = file.content.content[offset_begin..offset_end].to_owned();
-        let mut section_writer = std::io::Cursor::new(section_copy);
+        let mut section_copy: SectionContent =
+            self.file.content.content[offset_begin..offset_end].to_owned();
+
+        let rela_num = match self.rela_num {
+            None => return Ok(section_copy), /* No need to relocate, just output copy */
+            Some(rela_num) => rela_num,
+        };
+
+        let rela = ElfRelaAdapter::adapt(rela_num, &self.file.content)?;
+        let mut section_writer = std::io::Cursor::new(&mut section_copy[..]);
 
         for i in 0..rela.entries_count {
             let entry: &ElfRelaEntry = rela.get(i)?;
@@ -946,40 +1075,52 @@ impl<'a> RelocationData<'a> {
             let symbol =
                 /* Symbol in .rela has direct link to .symtab */
                 if symbol.st_shndx != STN_UNDEF {
-                    let InpSectFileMapping {outsect_num, per_file_offset_in_outsect} =
-                        match &file.inpsect_to_outsect[symbol.st_value as usize] {
-                            None => return e("Symbol from referenced in .rela is not reachable in final executable".into()),
+                    let InpSectFileMapping {outsect_num, inpsect_offset_in_outsect_file_part} =
+                        match &self.file.inpsect_to_outsect[symbol.st_shndx as usize] {
+                            None => return e("Symbol from referenced in .rela is not reachable in \
+                                              final executable".into()),
                             Some(mapping) => mapping.clone(),
                         };
 
                     Symbol {
                         outsect_num,
-                        file_num: file.number,
-                        outsect_offset: per_file_offset_in_outsect + symbol.st_value,
-                        visibility: SymbolVisibility::Strong, /* TODO: placeholder value or fetching the real one */
+                        file_num: self.file.number,
+                        outsect_offset: inpsect_offset_in_outsect_file_part + symbol.st_value,
+                        /* TODO: placeholder value or fetching the real one */
+                        visibility: SymbolVisibility::Strong,
                     }
                 /* Symbol is defined in separate file: consult the map. */
                 } else {
                     let name = rela.symtab.strtab.get(symbol.st_name)?;
-                    match global_map.get(name) {
+
+                    match self.symbol_map.get(name) {
                         None => {
                             /* TODO: better diagnostics (file name) */
-                            return e(format!("Undefined symbol {} referenced in a file with number {}", name, file.number));
+                            return e(format!("Undefined symbol {} referenced in a file \
+                                              with number {}", name, self.file.number));
                         }
                         Some(symbol) => symbol.value().clone()
                     }
                 };
 
-            let symbol_address = self.get_symbol_address(symbol);
-            let rela_address = self.get_rela_address(entry, inpsect_num);
-
+            let symbol_address = symbol.get_symbol_address(self.layout);
+            let rela_address = self.get_rela_address(entry, self.inpsect_num);
+            let rela_file_offset = self.get_rela_offset(entry, self.inpsect_num);
+            let rela_offset = entry.r_offset as u64;
             let value = symbol_address.checked_add_signed(entry.r_addend).unwrap();
 
-            /* Just a few relocations types, enough to carry as forward */
+            /* Just a few relocations types, enough to carry us forward */
             match entry.r_info_type {
                 /* direct 64 bit  */
                 R_X86_64_64 => {
-                    write_ne_at_pos(rela_address, value, &mut section_writer)?;
+                    println!(
+                        "relocation:\n    \
+                                  {:#x} (u64, absolute) inserted at:\n    \
+                                  {:#x} (in output file: {:#x})",
+                        value, rela_address, rela_file_offset
+                    );
+
+                    write_ne_at_pos(rela_offset, value, &mut section_writer)?;
                 }
                 /* direct 32 bit sign extended */
                 R_X86_64_32S => {
@@ -991,10 +1132,45 @@ impl<'a> RelocationData<'a> {
                             but the symbol address cannot be sign-extended from 32 bits",
                         )
                     })?;
-                    write_ne_at_pos(rela_address, value_trimmed, &mut section_writer)?;
+
+                    println!(
+                        "relocation:\n    \
+                                  {:#x} (i32, sign-extended absolute) inserted at:\n    \
+                                  {:#x} (in output file: {:#x})",
+                        value_trimmed, rela_address, rela_file_offset
+                    );
+
+                    write_ne_at_pos(rela_offset, value_trimmed, &mut section_writer)?;
                 }
                 /* PC relative 32 bit signed */
-                R_X86_64_PC32 => {}
+                R_X86_64_PC32 => {
+                    let get_error = |_| {
+                        Error::new(
+                            ErrorKind::InvalidData,
+                            "R_X86_64_PC32 relocation requested, \
+                            but the relative symbol address cannot be sign-extended from 32 bits",
+                        )
+                    };
+
+                    let value_trimmed: i32 =
+                        if let Some(value_sub) = value.checked_sub(rela_address) {
+                            i32::try_from(value_sub).map_err(get_error)?
+                        } else if let Some(value_sub) = rela_address.checked_sub(value) {
+                            let intermediary = -i64::try_from(value_sub).map_err(get_error)?;
+                            i32::try_from(intermediary).map_err(get_error)?
+                        } else {
+                            unreachable!()
+                        };
+
+                    println!(
+                        "relocation:\n    \
+                                  {:#x} (i32, PC relative) inserted at:\n    \
+                                  {:#x} (in output file: {:#x})",
+                        value_trimmed, rela_address, rela_file_offset
+                    );
+
+                    write_ne_at_pos(rela_offset, value_trimmed, &mut section_writer)?;
+                }
 
                 _ => {
                     return Err(Error::new(
@@ -1005,8 +1181,229 @@ impl<'a> RelocationData<'a> {
             };
         }
 
-        Ok(section_writer.into_inner())
+        Ok(section_copy)
     }
 }
 
-fn main() {}
+#[derive(Debug)]
+struct RelocatedFile<'a> {
+    preprocessed: &'a PreprocessedFile<'a>,
+    inpsects: Vec<SectionContent>,
+}
+
+impl<'a> RelocatedFile<'a> {
+    fn consume(
+        file: &'a PreprocessedFile<'a>,
+        layout: &FinalLayout,
+        symbol_map: &SymbolMap,
+    ) -> IoResult<Self> {
+        let mut inpsects = Vec::with_capacity(file.inpsect_to_rela.len());
+
+        for (rela_num, inpsect_num) in file.inpsect_to_rela.iter().copied().zip(0u16..) {
+            let relocation_data = SectionRelocationData {
+                file,
+                layout,
+                inpsect_num,
+                rela_num,
+                symbol_map,
+            };
+
+            inpsects.push(relocation_data.relocate_section()?);
+        }
+
+        Ok(RelocatedFile {
+            preprocessed: file,
+            inpsects,
+        })
+    }
+}
+
+fn generate_output_executable(
+    relocated_files: &Vec<RelocatedFile>,
+    layout: &FinalLayout,
+    symbol_map: &SymbolMap,
+) -> IoResult<Vec<u8>> {
+    let elf_header_size = std::mem::size_of::<ElfHeader>();
+
+    let prolog_size = {
+        let program_header_size = std::mem::size_of::<ElfProgramHeaderEntry>();
+        let program_headers_count = layout.final_segments.len();
+
+        elf_header_size + program_header_size * program_headers_count
+    };
+
+    if prolog_size > 0x1000 {
+        return Err(Error::new(
+            ErrorKind::StorageFull,
+            format!(
+                "For now the whole 'prolog' (file header, \
+                 section headers, program headers) have to fit in MAGPAGESIZE: {:#x}",
+                MAXPAGESIZE
+            ),
+        ));
+    }
+
+    let start = symbol_map
+        .get("_start")
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::NotFound,
+                "Cannot find _start symbol in the relocated files",
+            )
+        })?
+        .value()
+        .get_symbol_address(layout);
+
+    let elf_header = ElfHeader {
+        e_ident_magic: ELF_IDENT_MAGIC,
+        e_ident_class: ELF_IDENT_CLASS_X86_64,
+        e_ident_endianness: ELF_IDENT_ENDIANNESS_LITTLE,
+        e_ident_hversion: ELF_IDENT_HVERSION_CURRENT,
+        e_ident_osabi: ELF_IDENT_OSABI_SYSV,
+        e_ident_pad: 0,
+        e_type: ELF_TYPE_EXECUTABLE,
+        e_machine: ELF_MACHINE_X86_64,
+        e_version: ELF_VERSION_CURRENT,
+        e_entry: start,
+        e_phoff: elf_header_size as u64,
+        e_shoff: 0,
+        e_flags: 0,
+        e_ehsize: std::mem::size_of::<ElfHeader>() as u16,
+        e_phentsize: std::mem::size_of::<ElfProgramHeaderEntry>() as u16,
+        e_phnum: layout.final_segments.len() as u16,
+        e_shentsize: 0,
+        e_shnum: 0,
+        e_shstrndx: 0,
+    };
+
+    let segments_offset = align(prolog_size as u64, MAXPAGESIZE);
+
+    let file_size =
+        layout
+            .final_segments
+            .iter()
+            .fold(segments_offset, |acc, segment| match segment {
+                None => acc,
+                Some(segment) => align(acc, MAXPAGESIZE) + segment.size,
+            });
+
+    let mut final_content = vec![0u8; file_size as usize];
+    let mut content_writer = std::io::Cursor::new(&mut final_content[..]);
+
+    content_writer.seek(SeekFrom::Start(0))?;
+    content_writer.write_all(bytemuck::bytes_of(&elf_header))?;
+
+    let segment_iter = layout
+        .final_segments
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.as_ref().map(|s| (i, s)));
+
+    for (index, segment) in segment_iter {
+        let scheme = &layout.layout.scheme.segments[index];
+
+        let elf_program_header_entry = ElfProgramHeaderEntry {
+            p_type: PT_LOAD,
+            p_flags: PF_EXEC | PF_WRITE | PF_READ, /* uhh that's really bad, URGENT TODO */
+            p_offset: segment.offset_in_output_file,
+            p_vaddr: segment.virtmem_address,
+            p_paddr: segment.virtmem_address,
+            p_filesz: segment.size,
+            p_memsz: segment.size,
+            p_align: scheme.alignment,
+        };
+
+        content_writer.write_all(bytemuck::bytes_of(&elf_program_header_entry))?;
+    }
+
+    assert!(content_writer.seek(SeekFrom::Current(0))? <= segments_offset);
+    content_writer.seek(SeekFrom::Start(segments_offset))?;
+
+    for file in relocated_files {
+        for (section_content, section_index) in file.inpsects.iter().zip(0u16..) {
+            let mapping = &file.preprocessed.inpsect_to_outsect[section_index as usize];
+            let mapping = match mapping {
+                None => continue,
+                Some(mapping) => mapping,
+            };
+
+            let InpSectFileMapping {
+                outsect_num,
+                inpsect_offset_in_outsect_file_part,
+            } = *mapping;
+
+            let FinalOutSect {
+                size: _,
+                input_file_slots_offsets,
+                virtmem_address: _,
+                offset_in_output_file,
+            } = layout.final_outsects[outsect_num as usize]
+                .as_ref()
+                .unwrap();
+
+            let inpsect_start = offset_in_output_file
+                + inpsect_offset_in_outsect_file_part
+                + input_file_slots_offsets[file.preprocessed.number];
+
+            content_writer.seek(SeekFrom::Start(inpsect_start))?;
+            content_writer.write_all(section_content)?;
+        }
+    }
+
+    Ok(final_content)
+}
+
+fn main() {
+    let default_layout: Layout = Layout::new(&DEFAULT_SCHEME).unwrap();
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.len() < 3 {
+        println!("Usage: relocatable_files... executable_file");
+        std::process::exit(1);
+    }
+
+    let input_filenames = &args[1..args.len() - 1];
+    let output_filename = &args[args.len() - 1];
+
+    println!("[1/5] preprocessing files");
+
+    let preprocessed_files: Vec<_> = input_filenames
+        .par_iter()
+        .enumerate()
+        .map(|(number, filename)| {
+            let mut file = std::fs::File::open(filename).unwrap();
+            PreprocessedFile::new(&mut file, number, &default_layout).unwrap()
+        })
+        .collect();
+
+    println!("[2/5] fixing layout");
+
+    let final_layout = fix_layout(&default_layout, &preprocessed_files).unwrap();
+    let symbol_map: SymbolMap = SymbolMap::new();
+
+    println!("[3/5] gathering all symbols");
+
+    preprocessed_files
+        .par_iter()
+        .for_each(|file| process_symbols_from_file(file, &symbol_map).unwrap());
+
+    println!("[4/5] relocating");
+
+    let relocated_files: Vec<_> = preprocessed_files
+        .par_iter()
+        .map(|file| RelocatedFile::consume(file, &final_layout, &symbol_map).unwrap())
+        .collect();
+
+    println!("[5/5] outputing");
+
+    let output = generate_output_executable(&relocated_files, &final_layout, &symbol_map).unwrap();
+
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true).mode(0o755); /* RWX for owner, RX for others. */
+    let mut output_file = options.open(output_filename).unwrap();
+
+    output_file.write_all(&output).unwrap();
+}
