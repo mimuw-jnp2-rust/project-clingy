@@ -615,18 +615,17 @@ type OutSectPerFileOffsetsVec = Vec<Option<u64>>;
 type InpSectToRelaVec = Vec<Option<ElfSectionIndex>>;
 
 #[derive(Debug)]
-struct PreprocessedFile<'a> {
+struct PreprocessedFile {
     number: usize,
     content: ElfFileContent,
-    layout: &'a Layout<'a>, /* TODO: is this field really needed? */
     symtab_index: InpSectIndex,
     inpsect_to_outsect: InpSectToOutSectVec,
     inpsect_to_rela: InpSectToRelaVec,
     outsects_per_file_size: OutSectPerFileOffsetsVec,
 }
 
-impl<'a> PreprocessedFile<'a> {
-    fn new(file: &mut std::fs::File, number: usize, layout: &'a Layout) -> IoResult<Self> {
+impl PreprocessedFile {
+    fn new(file: &mut std::fs::File, number: usize, layout: &Layout) -> IoResult<Self> {
         let content = ElfFileContent::read(file)?;
         let mut symtab_index: Option<InpSectIndex> = None;
         let mut outsects_per_file_size: OutSectPerFileOffsetsVec = Vec::new();
@@ -711,7 +710,6 @@ impl<'a> PreprocessedFile<'a> {
         Ok(PreprocessedFile {
             content,
             number,
-            layout,
             symtab_index,
             inpsect_to_outsect,
             inpsect_to_rela,
@@ -1011,7 +1009,7 @@ where
 type SectionContent = Vec<u8>;
 
 struct SectionRelocationData<'a> {
-    file: &'a PreprocessedFile<'a>,
+    file: &'a PreprocessedFile,
     layout: &'a FinalLayout<'a>,
     inpsect_num: u16,
     rela_num: Option<u16>,
@@ -1187,13 +1185,13 @@ impl<'a> SectionRelocationData<'a> {
 
 #[derive(Debug)]
 struct RelocatedFile<'a> {
-    preprocessed: &'a PreprocessedFile<'a>,
+    preprocessed: &'a PreprocessedFile,
     inpsects: Vec<SectionContent>,
 }
 
 impl<'a> RelocatedFile<'a> {
-    fn consume(
-        file: &'a PreprocessedFile<'a>,
+    fn process(
+        file: &'a PreprocessedFile,
         layout: &FinalLayout,
         symbol_map: &SymbolMap,
     ) -> IoResult<Self> {
@@ -1391,10 +1389,11 @@ fn main() {
 
     let relocated_files: Vec<_> = preprocessed_files
         .par_iter()
-        .map(|file| RelocatedFile::consume(file, &final_layout, &symbol_map).unwrap())
+        .map(|file| RelocatedFile::process(file, &final_layout, &symbol_map).unwrap())
         .collect();
 
     println!("[5/5] outputing");
+
 
     let output = generate_output_executable(&relocated_files, &final_layout, &symbol_map).unwrap();
 
