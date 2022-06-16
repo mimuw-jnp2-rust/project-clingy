@@ -9,6 +9,9 @@ executable.
 
 ## Changelog
 
+#### 17.06.2022
+ * Added `vec_map` crate and introduced `newtype` pattern to ensure type safety.
+
 #### 09.06.2022
  * 1.4k SLOC reached.
  * Minimal working example: linking simple object files without shared
@@ -47,7 +50,7 @@ Hello, cruel world!⏎
 
 ## Roadmap
 
-#### 15.06.2022
+#### 19.06.2022
  * `NOBITS` (`.bss`) support
  * All TODOs fixed. Error reporting improved. Refactoring so that the code looks
    nicer and is more idiomatic.

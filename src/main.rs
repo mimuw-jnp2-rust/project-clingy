@@ -3,11 +3,18 @@
 #![feature(mixed_integer_ops)]
 use bytemuck::Pod;
 use bytemuck_derive::{Pod, Zeroable};
+use custom_derive::custom_derive;
 use rayon::iter::IndexedParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use std::ffi::CStr;
 use std::io::{Error, ErrorKind, Read, Result as IoResult, Seek, SeekFrom, Write};
+
+mod misc;
+use misc::align;
+
+use vec_map::{NumericIndex, Token, VecDict};
+use vec_map_derive::{NumericIndexTrait, TokenTrait};
 
 /* 1. In-file data structures
  *
@@ -543,15 +550,33 @@ impl<'a> LayoutScheme<'a> {
  *
  */
 
-type OutSectIndex = u16;
-type InpSectIndex = u16;
-type OutSectMatchersVec = Vec<Vec<globset::GlobMatcher>>;
+custom_derive! {
+    #[derive(TokenTrait, NumericIndexTrait, Debug, Clone, Copy)]
+    struct InpSectToken(usize);
+}
+
+custom_derive! {
+    #[derive(TokenTrait, NumericIndexTrait, Debug, Clone, Copy)]
+    struct OutSectToken(usize);
+}
+
+custom_derive! {
+    #[derive(TokenTrait, NumericIndexTrait, Debug, Clone, Copy)]
+    struct SegmentToken(usize);
+}
+
+custom_derive! {
+    #[derive(TokenTrait, NumericIndexTrait, Debug, Clone, Copy)]
+    struct FileToken(usize);
+}
+
+type OutSectMatchers = VecDict<OutSectToken, Vec<globset::GlobMatcher>>;
 
 #[derive(Debug)]
 struct Layout<'a> {
     scheme: &'a LayoutScheme<'a>,
     outsect_count: usize,
-    outsect_matchers: OutSectMatchersVec,
+    outsect_matchers: OutSectMatchers,
 }
 
 impl<'a> Layout<'a> {
@@ -563,10 +588,12 @@ impl<'a> Layout<'a> {
         })
     }
 
-    fn generate_outsects_matchers(scheme: &'a LayoutScheme<'a>) -> IoResult<OutSectMatchersVec> {
-        let mut outsect_matchers = Vec::new();
+    fn generate_outsects_matchers(scheme: &'a LayoutScheme<'a>) -> IoResult<OutSectMatchers> {
+        let outsect_count = scheme.outsect_iter().count();
+        let mut outsect_matchers = OutSectMatchers::new(outsect_count);
 
-        for outsect_scheme in scheme.outsect_iter() {
+        for (index, outsect_scheme) in scheme.outsect_iter().enumerate() {
+            let token = OutSectToken(index);
             let mut matchers = Vec::new();
 
             for pattern in outsect_scheme.inpsects {
@@ -575,16 +602,18 @@ impl<'a> Layout<'a> {
                     .compile_matcher();
                 matchers.push(matcher);
             }
-            outsect_matchers.push(matchers);
+
+            outsect_matchers.insert(&token, matchers);
         }
+
         Ok(outsect_matchers)
     }
 
-    fn match_inpsect(&self, inpsect_name: &str) -> Option<OutSectIndex> {
-        for (outsect_num, matchers) in self.outsect_matchers.iter().enumerate() {
+    fn match_inpsect(&self, inpsect_name: &str) -> Option<OutSectToken> {
+        for (token, matchers) in self.outsect_matchers.tok_iter() {
             for matcher in matchers {
                 if matcher.is_match(inpsect_name) {
-                    return Some(outsect_num as OutSectIndex);
+                    return Some(token);
                 }
             }
         }
@@ -593,90 +622,80 @@ impl<'a> Layout<'a> {
     }
 }
 
-/* TODO: find some crate to do that? */
-fn align(num: u64, bound: u64) -> u64 {
-    ((num + (bound - 1)) / bound) * bound
-}
-
 #[derive(Clone, Debug)]
 struct InpSectFileMapping {
-    outsect_num: OutSectIndex,
+    outsect_token: OutSectToken,
     inpsect_offset_in_outsect_file_part: u64,
 }
 
-/* This is per-file vector indexed by InpSectIndex. Not every InpSect is mapped to output file. */
-type InpSectToOutSectVec = Vec<Option<InpSectFileMapping>>;
-
-/* This is per-file vector indexed by OutSectIndex. Some OutSects do not have corresponding InpSect
- * in input file. */
-type OutSectPerFileOffsetsVec = Vec<Option<u64>>;
-
-/* This is per-file vector indexed by InpSectIndex. Not every InpSect is mapped to output file. */
-type InpSectToRelaVec = Vec<Option<ElfSectionIndex>>;
+type InpSectToOutSect = VecDict<InpSectToken, InpSectFileMapping>;
+type OutSectPerFileOffsets = VecDict<OutSectToken, u64>;
+type InpSectToRela = VecDict<InpSectToken, InpSectToken>;
 
 #[derive(Debug)]
 struct PreprocessedFile {
-    number: usize,
+    token: FileToken,
     content: ElfFileContent,
-    symtab_index: InpSectIndex,
-    inpsect_to_outsect: InpSectToOutSectVec,
-    inpsect_to_rela: InpSectToRelaVec,
-    outsects_per_file_size: OutSectPerFileOffsetsVec,
+    symtab_token: InpSectToken,
+    inpsect_to_outsect: InpSectToOutSect,
+    inpsect_to_rela: InpSectToRela,
+    outsects_per_file_size: OutSectPerFileOffsets,
 }
 
 impl PreprocessedFile {
     fn new(file: &mut std::fs::File, number: usize, layout: &Layout) -> IoResult<Self> {
         let content = ElfFileContent::read(file)?;
-        let mut symtab_index: Option<InpSectIndex> = None;
-        let mut outsects_per_file_size: OutSectPerFileOffsetsVec = Vec::new();
-        outsects_per_file_size.resize(layout.outsect_count, None);
+        let mut outsects_per_file_size = OutSectPerFileOffsets::new(layout.outsect_count);
 
         let header = content.get_elf_header()?;
         let section_names = ElfStringTableAdapter::adapt(header.e_shstrndx, &content)?;
-        let sections_count = header.e_shnum as usize;
+        let inpsects_count = header.e_shnum as usize;
 
-        let mut inpsect_to_outsect: InpSectToOutSectVec = vec![None; sections_count];
-        let mut inpsect_to_rela: InpSectToRelaVec = vec![None; sections_count];
+        let mut inpsect_to_outsect = InpSectToOutSect::new(inpsects_count);
+        let mut inpsect_to_rela = InpSectToRela::new(inpsects_count);
 
         let e = |desc| Err(Error::new(ErrorKind::Other, desc));
 
-        let mut map_inpsect_to_outsect = |inpsect_idx, inpsect_size, outsect_num| {
-            if outsects_per_file_size[outsect_num as usize].is_none() {
-                outsects_per_file_size[outsect_num as usize] = Some(0)
-            }
-
+        let mut map_inpsect_to_outsect = |inpsect_token, inpsect_size, outsect_token| {
             let current_outsect_per_file_size =
-                outsects_per_file_size[outsect_num as usize].unwrap();
+                *outsects_per_file_size.get(&outsect_token).unwrap_or(&0);
 
             /* TODO: Alignment. Right now we are aligning to the nearest multiple of 16. Use
              * real alignment field from InpSect. */
             let offset_aligned = align(current_outsect_per_file_size, 16);
 
-            inpsect_to_outsect[inpsect_idx as usize] = Some(InpSectFileMapping {
-                outsect_num,
-                inpsect_offset_in_outsect_file_part: offset_aligned,
-            });
+            inpsect_to_outsect.insert(
+                &inpsect_token,
+                InpSectFileMapping {
+                    outsect_token,
+                    inpsect_offset_in_outsect_file_part: offset_aligned,
+                },
+            );
 
-            outsects_per_file_size[outsect_num as usize] = Some(offset_aligned + inpsect_size);
+            outsects_per_file_size.insert(&outsect_token, offset_aligned + inpsect_size);
         };
 
-        for section_idx in 0..header.e_shnum {
-            let section = content.get_section_entry(section_idx)?;
+        let mut symtab_token: Option<InpSectToken> = None;
+
+        for index in 0..header.e_shnum {
+            let token = InpSectToken(index as usize);
+
+            let section = content.get_section_entry(index)?;
             PreprocessedFile::section_type_implemented_assert(section)?;
 
             if let SHT_SYMTAB = section.sh_type {
-                if symtab_index.is_none() {
-                    symtab_index = Some(section_idx)
+                if symtab_token.is_none() {
+                    symtab_token = Some(token)
                 } else {
                     return e("A file cannot contain more than one symbol table".to_string());
                 }
             }
 
             if let SHT_RELA = section.sh_type {
-                let entry = &mut inpsect_to_rela[section.sh_info as usize];
+                let linked_token = InpSectToken(section.sh_info as usize);
 
-                match entry {
-                    None => *entry = Some(section_idx),
+                match inpsect_to_rela.get(&linked_token) {
+                    None => inpsect_to_rela.insert(&linked_token, token),
                     Some(_) => {
                         return e(format!(
                             "More than one relocation tables reference section '{}'",
@@ -698,19 +717,19 @@ impl PreprocessedFile {
                     )
                 })?;
 
-                map_inpsect_to_outsect(section_idx, section.sh_size, outsect_num);
+                map_inpsect_to_outsect(token, section.sh_size, outsect_num);
             }
         }
 
-        let symtab_index = match symtab_index {
+        let symtab_token = match symtab_token {
             None => return e("A file must contain a symbol table".to_string()),
-            Some(index) => index,
+            Some(token) => token,
         };
 
         Ok(PreprocessedFile {
             content,
-            number,
-            symtab_index,
+            token: FileToken(number),
+            symtab_token,
             inpsect_to_outsect,
             inpsect_to_rela,
             outsects_per_file_size,
@@ -726,18 +745,13 @@ impl PreprocessedFile {
         }
     }
 
-    fn get_inpsect_file_mapping(
-        &self,
-        section_index: ElfSectionIndex,
-    ) -> IoResult<InpSectFileMapping> {
-        self.inpsect_to_outsect[section_index as usize]
-            .clone()
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::InvalidInput,
-                    "Entry in symbol table points to a special section.",
-                )
-            })
+    fn get_inpsect_file_mapping(&self, token: InpSectToken) -> IoResult<&InpSectFileMapping> {
+        self.inpsect_to_outsect.get(&token).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "Entry in symbol table points to a special section.",
+            )
+        })
     }
 }
 
@@ -751,8 +765,8 @@ enum SymbolVisibility {
 
 #[derive(Debug, Clone)]
 struct Symbol {
-    outsect_num: u16,
-    file_num: usize,
+    outsect_token: OutSectToken,
+    file_token: FileToken,
     outsect_offset: u64,
     visibility: SymbolVisibility,
 }
@@ -760,20 +774,16 @@ struct Symbol {
 impl Symbol {
     fn get_symbol_address(&self, layout: &FinalLayout) -> u64 {
         let Symbol {
-            outsect_num,
-            file_num,
+            outsect_token,
+            file_token,
             outsect_offset, /* outsec_offset == symbol offset + insect offset in outsect file par */
             visibility: _,
-        } = *self;
+        } = self;
 
-        let outsect = layout.final_outsects[outsect_num as usize]
-            .as_ref()
-            .unwrap();
+        let outsect = &layout.final_outsects[outsect_token];
 
         /* Address */
-        outsect.virtmem_address
-            + outsect.input_file_slots_offsets[file_num as usize]
-            + outsect_offset
+        outsect.virtmem_address + outsect.input_file_slots_offsets[file_token] + outsect_offset
     }
 }
 
@@ -783,13 +793,16 @@ struct InpSectRelativeAddress {
 }
 
 fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap) -> IoResult<()> {
-    let symtab = ElfSymtabAdapter::adapt(file.symtab_index, &file.content)?;
+    let InpSectToken(symtab_index) = file.symtab_token;
+    let symtab = ElfSymtabAdapter::adapt(symtab_index as u16, &file.content)?;
 
     let e = |desc| Err(Error::new(ErrorKind::Other, desc));
 
     let append_global_symbol = |symbol: &ElfSymtabEntry| {
+        let symbol_inpsect = InpSectToken(symbol.st_shndx as usize);
+
         let name: &str = symtab.strtab.get(symbol.st_name)?;
-        let mapping = file.get_inpsect_file_mapping(symbol.st_shndx)?;
+        let mapping = file.get_inpsect_file_mapping(symbol_inpsect)?;
 
         let symbol_visibility = match symbol.get_stb() {
             STB_GLOBAL => SymbolVisibility::Strong,
@@ -798,9 +811,9 @@ fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap) ->
         };
 
         let symbol = Symbol {
-            outsect_num: mapping.outsect_num,
+            outsect_token: mapping.outsect_token,
             outsect_offset: mapping.inpsect_offset_in_outsect_file_part + symbol.st_value,
-            file_num: file.number,
+            file_token: file.token,
             visibility: symbol_visibility,
         };
 
@@ -859,7 +872,7 @@ struct FinalSegment {
 #[derive(Debug, Clone)]
 struct FinalOutSect {
     size: u64,
-    input_file_slots_offsets: Vec<u64>,
+    input_file_slots_offsets: VecDict<FileToken, u64>,
     virtmem_address: u64,
     offset_in_output_file: u64,
 }
@@ -867,8 +880,8 @@ struct FinalOutSect {
 #[derive(Debug)]
 struct FinalLayout<'a> {
     layout: &'a Layout<'a>,
-    final_segments: Vec<Option<FinalSegment>>,
-    final_outsects: Vec<Option<FinalOutSect>>,
+    final_segments: VecDict<SegmentToken, FinalSegment>,
+    final_outsects: VecDict<OutSectToken, FinalOutSect>,
 }
 
 fn fix_layout<'a>(
@@ -876,64 +889,74 @@ fn fix_layout<'a>(
     preprocessed_files: &'a Vec<PreprocessedFile>,
 ) -> IoResult<FinalLayout<'a>> {
     let files_count = preprocessed_files.len();
-    let mut final_outsects = Vec::<_>::with_capacity(layout.outsect_count);
+    let mut final_outsects = VecDict::<OutSectToken, FinalOutSect>::new(layout.outsect_count);
 
-    for outsect_num in 0..layout.outsect_count {
+    for num in 0..layout.outsect_count {
+        let token = OutSectToken(num);
+
         let is_present = preprocessed_files
             .iter()
-            .any(|file| file.outsects_per_file_size[outsect_num].is_some());
+            .any(|file| file.outsects_per_file_size.contains_key(&token));
 
-        if !is_present {
-            final_outsects.push(None)
-        } else {
-            final_outsects.push(Some(FinalOutSect {
-                size: 0,
-                input_file_slots_offsets: vec![0; files_count],
-                virtmem_address: 0,
-                offset_in_output_file: 0,
-            }))
+        if is_present {
+            final_outsects.insert(
+                &token,
+                FinalOutSect {
+                    size: 0,
+                    input_file_slots_offsets: VecDict::new(files_count),
+                    virtmem_address: 0,
+                    offset_in_output_file: 0,
+                },
+            );
         }
     }
 
-    for (outsect_num, outsect) in final_outsects.iter_mut().enumerate() {
-        let mut outsect = match outsect {
-            None => continue,
-            Some(outsect) => outsect,
-        };
-
+    for (outsect_token, outsect) in final_outsects.tok_iter_mut() {
         let mut relative_offset: u64 = 0;
 
-        for (file_num, file) in preprocessed_files.iter().enumerate() {
+        for file in preprocessed_files.iter() {
             relative_offset = align(relative_offset, 16); /* TODO: proper alignment */
-            outsect.input_file_slots_offsets[file_num as usize] = relative_offset;
-            relative_offset += file.outsects_per_file_size[outsect_num].unwrap_or(0);
+            outsect
+                .input_file_slots_offsets
+                .insert(&file.token, relative_offset);
+            relative_offset += file
+                .outsects_per_file_size
+                .get(&outsect_token)
+                .unwrap_or(&0);
         }
 
         outsect.size = relative_offset;
     }
 
     let segment_count = layout.scheme.segments.len();
-    let mut final_segments = Vec::<_>::with_capacity(segment_count);
+    let mut final_segments = VecDict::<SegmentToken, FinalSegment>::new(segment_count);
 
     let mut current_address = 0x0;
     let mut current_offset_in_file = MAXPAGESIZE;
 
-    let mut outsects_iter = final_outsects.iter_mut();
+    let mut outsects_iter = final_outsects.tok_iter_mut();
 
-    for segment in layout.scheme.segment_iter() {
+    for (index, segment) in layout.scheme.segment_iter().enumerate() {
+        let token = SegmentToken(index);
+
+        let file_to_large_error = |abs_address| {
+            Err(Error::new(
+                ErrorKind::FileTooLarge,
+                format!(
+                    "Cannot fit OutSects into LayoutScheme (cannot fit OutSects below \
+                                 next OutSect {:#x} virtual address boundary)",
+                    abs_address
+                ),
+            ))
+        };
+
         current_address = match segment.start {
             AddrScheme::Absolute(abs_address) => {
                 if current_address > abs_address {
-                    return Err(Error::new(
-                        ErrorKind::FileTooLarge,
-                        format!(
-                            "Cannot fit OutSects into LayoutScheme (cannot fit OutSects below \
-                                 next OutSect {:#x} virtual address boundary)",
-                            abs_address
-                        ),
-                    ));
+                    return file_to_large_error(abs_address);
+                } else {
+                    abs_address
                 }
-                abs_address
             }
             AddrScheme::CurrentLocation => align(current_address, segment.alignment),
         };
@@ -946,11 +969,11 @@ fn fix_layout<'a>(
 
         for _ in segment.sections {
             let next_outsect = match outsects_iter.next() {
-                Some(Some(outsect)) => {
+                Some((_, outsect)) => {
                     any_outsect_present_in_segment = true;
                     outsect
                 }
-                _ => continue,
+                None => continue,
             };
 
             current_address = align(current_address, 16); /* TODO: proper alignment */
@@ -964,13 +987,14 @@ fn fix_layout<'a>(
         }
 
         if any_outsect_present_in_segment {
-            final_segments.push(Some(FinalSegment {
-                size: current_offset_in_file - offset_in_output_file,
-                virtmem_address,
-                offset_in_output_file,
-            }));
-        } else {
-            final_segments.push(None);
+            final_segments.insert(
+                &token,
+                FinalSegment {
+                    size: current_offset_in_file - offset_in_output_file,
+                    virtmem_address,
+                    offset_in_output_file,
+                },
+            );
         }
     }
 
@@ -1011,44 +1035,37 @@ type SectionContent = Vec<u8>;
 struct SectionRelocationData<'a> {
     file: &'a PreprocessedFile,
     layout: &'a FinalLayout<'a>,
-    inpsect_num: u16,
-    rela_num: Option<u16>,
+    inpsect_token: InpSectToken,
+    rela_token: Option<InpSectToken>,
     symbol_map: &'a SymbolMap,
 }
 
 impl<'a> SectionRelocationData<'a> {
-    fn get_rela_address(&self, entry: &ElfRelaEntry, inpsect_num: u16) -> u64 {
-        let mapping = self.file.inpsect_to_outsect[inpsect_num as usize]
-            .as_ref()
-            .unwrap();
-        let outsect = self.layout.final_outsects[mapping.outsect_num as usize]
-            .as_ref()
-            .unwrap();
+    fn get_rela_address(&self, entry: &ElfRelaEntry, inpsect_token: &InpSectToken) -> u64 {
+        let mapping = &self.file.inpsect_to_outsect[inpsect_token];
+        let outsect = &self.layout.final_outsects[&mapping.outsect_token];
 
         /* Address */
         outsect.virtmem_address
-            + outsect.input_file_slots_offsets[self.file.number as usize]
+            + outsect.input_file_slots_offsets[&self.file.token]
             + mapping.inpsect_offset_in_outsect_file_part
             + entry.r_offset
     }
 
-    fn get_rela_offset(&self, entry: &ElfRelaEntry, inpsect_num: u16) -> u64 {
-        let mapping = self.file.inpsect_to_outsect[inpsect_num as usize]
-            .as_ref()
-            .unwrap();
-        let outsect = self.layout.final_outsects[mapping.outsect_num as usize]
-            .as_ref()
-            .unwrap();
+    fn get_rela_offset(&self, entry: &ElfRelaEntry, inpsect_token: &InpSectToken) -> u64 {
+        let mapping = &self.file.inpsect_to_outsect[inpsect_token];
+        let outsect = &self.layout.final_outsects[&mapping.outsect_token];
 
         /* Offset */
         outsect.offset_in_output_file
-            + outsect.input_file_slots_offsets[self.file.number as usize]
+            + outsect.input_file_slots_offsets[&self.file.token]
             + mapping.inpsect_offset_in_outsect_file_part
             + entry.r_offset
     }
 
     fn relocate_section(&self) -> IoResult<SectionContent> {
-        let section = self.file.content.get_section_entry(self.inpsect_num)?;
+        let InpSectToken(inpsect_num) = self.inpsect_token;
+        let section = self.file.content.get_section_entry(inpsect_num as u16)?;
 
         let offset_begin = section.sh_offset as usize;
         let offset_end = offset_begin + section.sh_size as usize;
@@ -1056,12 +1073,14 @@ impl<'a> SectionRelocationData<'a> {
         let mut section_copy: SectionContent =
             self.file.content.content[offset_begin..offset_end].to_owned();
 
-        let rela_num = match self.rela_num {
+        let rela_token = match self.rela_token {
             None => return Ok(section_copy), /* No need to relocate, just output copy */
-            Some(rela_num) => rela_num,
+            Some(rela_token) => rela_token,
         };
 
-        let rela = ElfRelaAdapter::adapt(rela_num, &self.file.content)?;
+        let InpSectToken(rela_num) = rela_token;
+
+        let rela = ElfRelaAdapter::adapt(rela_num as u16, &self.file.content)?;
         let mut section_writer = std::io::Cursor::new(&mut section_copy[..]);
 
         for i in 0..rela.entries_count {
@@ -1069,20 +1088,21 @@ impl<'a> SectionRelocationData<'a> {
             let symbol: &ElfSymtabEntry = rela.symtab.get(entry.r_info_sym as u64)?;
 
             let e = |desc: String| Err(Error::new(ErrorKind::InvalidData, desc));
+            let inpsect_token = InpSectToken(symbol.st_shndx as usize);
 
             let symbol =
                 /* Symbol in .rela has direct link to .symtab */
                 if symbol.st_shndx != STN_UNDEF {
-                    let InpSectFileMapping {outsect_num, inpsect_offset_in_outsect_file_part} =
-                        match &self.file.inpsect_to_outsect[symbol.st_shndx as usize] {
+                    let InpSectFileMapping {outsect_token, inpsect_offset_in_outsect_file_part} =
+                        match &self.file.inpsect_to_outsect.get(&inpsect_token) {
                             None => return e("Symbol from referenced in .rela is not reachable in \
                                               final executable".into()),
                             Some(mapping) => mapping.clone(),
                         };
 
                     Symbol {
-                        outsect_num,
-                        file_num: self.file.number,
+                        outsect_token: outsect_token.clone(),
+                        file_token: self.file.token,
                         outsect_offset: inpsect_offset_in_outsect_file_part + symbol.st_value,
                         /* TODO: placeholder value or fetching the real one */
                         visibility: SymbolVisibility::Strong,
@@ -1093,17 +1113,18 @@ impl<'a> SectionRelocationData<'a> {
 
                     match self.symbol_map.get(name) {
                         None => {
+                            let FileToken(file_number) = self.file.token;
                             /* TODO: better diagnostics (file name) */
                             return e(format!("Undefined symbol {} referenced in a file \
-                                              with number {}", name, self.file.number));
+                                              with number {}", name, file_number));
                         }
                         Some(symbol) => symbol.value().clone()
                     }
                 };
 
             let symbol_address = symbol.get_symbol_address(self.layout);
-            let rela_address = self.get_rela_address(entry, self.inpsect_num);
-            let rela_file_offset = self.get_rela_offset(entry, self.inpsect_num);
+            let rela_address = self.get_rela_address(entry, &self.inpsect_token);
+            let rela_file_offset = self.get_rela_offset(entry, &self.inpsect_token);
             let rela_offset = entry.r_offset as u64;
             let value = symbol_address.checked_add_signed(entry.r_addend).unwrap();
 
@@ -1186,7 +1207,7 @@ impl<'a> SectionRelocationData<'a> {
 #[derive(Debug)]
 struct RelocatedFile<'a> {
     preprocessed: &'a PreprocessedFile,
-    inpsects: Vec<SectionContent>,
+    inpsects: VecDict<InpSectToken, SectionContent>,
 }
 
 impl<'a> RelocatedFile<'a> {
@@ -1195,19 +1216,25 @@ impl<'a> RelocatedFile<'a> {
         layout: &FinalLayout,
         symbol_map: &SymbolMap,
     ) -> IoResult<Self> {
-        let mut inpsects = Vec::with_capacity(file.inpsect_to_rela.len());
+        let inpsect_count = file.inpsect_to_outsect.len();
+        let mut inpsects = VecDict::new(file.inpsect_to_rela.len());
 
-        for (rela_num, inpsect_num) in file.inpsect_to_rela.iter().copied().zip(0u16..) {
+        (0..inpsect_count).try_for_each::<_, IoResult<()>>(|num| {
+            let token = InpSectToken(num);
+            let rela_token = file.inpsect_to_rela.get(&InpSectToken(num)).cloned();
+
             let relocation_data = SectionRelocationData {
                 file,
                 layout,
-                inpsect_num,
-                rela_num,
+                inpsect_token: token,
+                rela_token,
                 symbol_map,
             };
 
-            inpsects.push(relocation_data.relocate_section()?);
-        }
+            inpsects.insert(&token, relocation_data.relocate_section()?);
+
+            Ok(())
+        })?;
 
         Ok(RelocatedFile {
             preprocessed: file,
@@ -1276,14 +1303,13 @@ fn generate_output_executable(
 
     let segments_offset = align(prolog_size as u64, MAXPAGESIZE);
 
-    let file_size =
-        layout
-            .final_segments
-            .iter()
-            .fold(segments_offset, |acc, segment| match segment {
-                None => acc,
-                Some(segment) => align(acc, MAXPAGESIZE) + segment.size,
-            });
+    let file_size = layout
+        .final_segments
+        .tok_iter()
+        .map(|(_, segment)| segment)
+        .fold(segments_offset, |acc, segment| {
+            align(acc, MAXPAGESIZE) + segment.size
+        });
 
     let mut final_content = vec![0u8; file_size as usize];
     let mut content_writer = std::io::Cursor::new(&mut final_content[..]);
@@ -1291,13 +1317,10 @@ fn generate_output_executable(
     content_writer.seek(SeekFrom::Start(0))?;
     content_writer.write_all(bytemuck::bytes_of(&elf_header))?;
 
-    let segment_iter = layout
-        .final_segments
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| s.as_ref().map(|s| (i, s)));
+    let segment_iter = layout.final_segments.tok_iter();
 
-    for (index, segment) in segment_iter {
+    for (token, segment) in segment_iter {
+        let SegmentToken(index) = token;
         let scheme = &layout.layout.scheme.segments[index];
 
         let elf_program_header_entry = ElfProgramHeaderEntry {
@@ -1318,30 +1341,25 @@ fn generate_output_executable(
     content_writer.seek(SeekFrom::Start(segments_offset))?;
 
     for file in relocated_files {
-        for (section_content, section_index) in file.inpsects.iter().zip(0u16..) {
-            let mapping = &file.preprocessed.inpsect_to_outsect[section_index as usize];
-            let mapping = match mapping {
-                None => continue,
-                Some(mapping) => mapping,
-            };
-
+        for (token, section_content) in file.inpsects.tok_iter() {
             let InpSectFileMapping {
-                outsect_num,
+                outsect_token: token,
                 inpsect_offset_in_outsect_file_part,
-            } = *mapping;
+            } = match file.preprocessed.inpsect_to_outsect.get(&token) {
+                Some(mapping) => mapping,
+                None => continue,
+            };
 
             let FinalOutSect {
                 size: _,
                 input_file_slots_offsets,
                 virtmem_address: _,
                 offset_in_output_file,
-            } = layout.final_outsects[outsect_num as usize]
-                .as_ref()
-                .unwrap();
+            } = &layout.final_outsects[&token];
 
             let inpsect_start = offset_in_output_file
                 + inpsect_offset_in_outsect_file_part
-                + input_file_slots_offsets[file.preprocessed.number];
+                + input_file_slots_offsets[&file.preprocessed.token];
 
             content_writer.seek(SeekFrom::Start(inpsect_start))?;
             content_writer.write_all(section_content)?;
@@ -1393,7 +1411,6 @@ fn main() {
         .collect();
 
     println!("[5/5] outputing");
-
 
     let output = generate_output_executable(&relocated_files, &final_layout, &symbol_map).unwrap();
 
