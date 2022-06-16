@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bytemuck = "= 1.9.1"
-bytemuck_derive = "= 1.1.0"
-dashmap = "= 5.3.4"
-globset = "= 0.4.8"
-rayon = "= 1.5.3"
+bytemuck = "1.9.1"
+bytemuck_derive = "1.1.0"
+custom_derive = "0.1.7"
+dashmap = "5.3.4"
+globset = "0.4.8"
+rayon = "1.5.3"
+vec_map = { version = "0.1.0", path = "vec_map" }
+vec_map-derive = { version = "0.1.0", path = "vec_map-derive" }
