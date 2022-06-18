@@ -7,14 +7,14 @@
  ----------------
 
  Sometimes all you need as a key is just a wrapper over `usize`. In that case you can use
- macros from the `vec_map-derive` crate (they require `custom_derive!` helper).
+ macros from the `vec_map-derive` crate (they require `!` helper).
 
  ```rust
  use custom_derive::custom_derive;
  use vec_map_derive::{TokenTrait, NumericIndexTrait};
 
- custom_derive! {
-     #[derive(TokenTrait, NumericIndexTrait)]
+ macro_attr! {
+     #[derive(TokenTrait!, NumericIndexTrait!)]
      struct SectionToken(usize);
  }
  ```

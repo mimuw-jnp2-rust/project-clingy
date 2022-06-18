@@ -1,6 +1,7 @@
 #![feature(cstr_from_bytes_until_nul)]
 #![feature(io_error_more)]
 #![feature(mixed_integer_ops)]
+#[macro_use] extern crate macro_attr;
 
 mod elf_file;
 mod misc;

@@ -2,27 +2,26 @@ pub fn align(num: u64, bound: u64) -> u64 {
     ((num + (bound - 1)) / bound) * bound
 }
 
-use custom_derive::custom_derive;
 use vec_map_derive::{Token, NumericIndex};
 use std::io::Result as IoResult;
 
-custom_derive! {
-    #[derive(Token, NumericIndex, Debug, Clone, Copy)]
+macro_attr! {
+    #[derive(Token!, NumericIndex!, Debug, Clone, Copy)]
     pub struct InpSectToken(pub usize);
 }
 
-custom_derive! {
-    #[derive(Token, NumericIndex, Debug, Clone, Copy)]
+macro_attr! {
+    #[derive(Token!, NumericIndex!, Debug, Clone, Copy)]
     pub struct OutSectToken(pub usize);
 }
 
-custom_derive! {
-    #[derive(Token, NumericIndex, Debug, Clone, Copy)]
+macro_attr! {
+    #[derive(Token!, NumericIndex!, Debug, Clone, Copy)]
     pub struct SegmentToken(pub usize);
 }
 
-custom_derive! {
-    #[derive(Token, NumericIndex, Debug, Clone, Copy)]
+macro_attr! {
+    #[derive(Token!, NumericIndex!, Debug, Clone, Copy)]
     pub struct FileToken(pub usize);
 }
 
