@@ -7,7 +7,7 @@
  ----------------
 
  Sometimes all you need as a key is just a wrapper over `usize`. In that case you can use
- macroes from the `vec_map-derive` crate (they require `custom_derive!` helper).
+ macros from the `vec_map-derive` crate (they require `custom_derive!` helper).
 
  ```rust
  use custom_derive::custom_derive;

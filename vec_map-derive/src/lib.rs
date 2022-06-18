@@ -1,7 +1,7 @@
 #[macro_export]
-macro_rules! TokenTrait {
+macro_rules! Token {
     (() $(pub)* struct $name:ident(pub usize);) => {
-        impl Token for $name {
+        impl vec_map::Token for $name {
             fn from_numeric_index(v: usize) -> Self {
                 $name(v)
             }
@@ -9,7 +9,7 @@ macro_rules! TokenTrait {
     };
 
     (() $(pub)* struct $name:ident(usize);) => {
-        impl Token for $name {
+        impl vec_map::Token for $name {
             fn from_numeric_index(v: usize) -> Self {
                 $name(v)
             }
@@ -18,9 +18,9 @@ macro_rules! TokenTrait {
 }
 
 #[macro_export]
-macro_rules! NumericIndexTrait {
+macro_rules! NumericIndex {
     (() $(pub)* struct $name:ident(pub usize);) => {
-        impl NumericIndex for $name {
+        impl vec_map::NumericIndex for $name {
             fn get_numeric_index(&self) -> usize {
                 self.0
             }
@@ -28,7 +28,7 @@ macro_rules! NumericIndexTrait {
     };
 
     (() $(pub)* struct $name:ident(usize);) => {
-        impl NumericIndex for $name {
+        impl vec_map::NumericIndex for $name {
             fn get_numeric_index(&self) -> usize {
                 self.0
             }

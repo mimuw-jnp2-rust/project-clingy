@@ -13,8 +13,8 @@ use std::io::{Error, ErrorKind, Read, Result as IoResult, Seek, SeekFrom, Write}
 mod misc;
 use misc::align;
 
-use vec_map::{NumericIndex, Token, VecDict};
-use vec_map_derive::{NumericIndexTrait, TokenTrait};
+use vec_map::VecDict;
+use vec_map_derive::{NumericIndex, Token};
 
 /* 1. In-file data structures
  *
@@ -551,22 +551,22 @@ impl<'a> LayoutScheme<'a> {
  */
 
 custom_derive! {
-    #[derive(TokenTrait, NumericIndexTrait, Debug, Clone, Copy)]
+    #[derive(Token, NumericIndex, Debug, Clone, Copy)]
     struct InpSectToken(usize);
 }
 
 custom_derive! {
-    #[derive(TokenTrait, NumericIndexTrait, Debug, Clone, Copy)]
+    #[derive(Token, NumericIndex, Debug, Clone, Copy)]
     struct OutSectToken(usize);
 }
 
 custom_derive! {
-    #[derive(TokenTrait, NumericIndexTrait, Debug, Clone, Copy)]
+    #[derive(Token, NumericIndex, Debug, Clone, Copy)]
     struct SegmentToken(usize);
 }
 
 custom_derive! {
-    #[derive(TokenTrait, NumericIndexTrait, Debug, Clone, Copy)]
+    #[derive(Token, NumericIndex, Debug, Clone, Copy)]
     struct FileToken(usize);
 }
 
