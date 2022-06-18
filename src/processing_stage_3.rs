@@ -1,4 +1,4 @@
-/* Stage 3. Fix virtual memory array. Assign addresses to every Segment and OutSect. */
+/* Stage 3. Fix virtual memory layout. Assign addresses to every Segment and OutSect. */
 
 use std::io::Result as IoResult;
 use std::io::{Error, ErrorKind};

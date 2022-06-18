@@ -1,4 +1,4 @@
-/* Stage 5. Generate output executable. */
+/* Stage 5. Create executable. */
 
 use std::io::{Seek, SeekFrom, Write, Error, ErrorKind};
 use std::io::Result as IoResult;
@@ -128,7 +128,7 @@ pub fn generate_output_executable(
                 input_file_slots_offsets,
                 virtmem_address: _,
                 offset_in_output_file,
-            } = &layout.final_outsects[&token];
+            } = &layout.final_outsects[token];
 
             let inpsect_start = offset_in_output_file
                 + inpsect_offset_in_outsect_file_part

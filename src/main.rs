@@ -24,7 +24,6 @@ use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use rayon::iter::IndexedParallelIterator;
 
-
 fn main() {
     let default_layout: Layout = Layout::new(&DEFAULT_SCHEME).unwrap();
     let args: Vec<String> = std::env::args().collect();

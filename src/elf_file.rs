@@ -112,7 +112,7 @@ impl ElfHeader {
         let e = |desc| Err(Error::new(ErrorKind::InvalidData, desc));
 
         match true {
-            _ if &self.e_ident_magic != &ELF_IDENT_MAGIC => e("Bad magic. Not an ELF file?"),
+            _ if self.e_ident_magic != ELF_IDENT_MAGIC => e("Bad magic. Not an ELF file?"),
             _ if self.e_ident_class != ELF_IDENT_CLASS_X86_64 => {
                 e("Bad file class. Was the object file built for x86_64 CPU?")
             }

@@ -10,6 +10,7 @@ pub const DEFAULT_SCHEME: LayoutScheme<'static> = LayoutScheme {
             sections: &[OutSectScheme {
                 name: ".text",
                 inpsects: &[".text", ".text.*"],
+                outsect_type: OutSectType::ProgBits,
             }],
         },
         SegmentScheme {
@@ -19,6 +20,7 @@ pub const DEFAULT_SCHEME: LayoutScheme<'static> = LayoutScheme {
             sections: &[OutSectScheme {
                 name: ".rodata",
                 inpsects: &[".rodata", ".rodata.*"],
+                outsect_type: OutSectType::ProgBits,
             }],
         },
         SegmentScheme {
@@ -29,10 +31,12 @@ pub const DEFAULT_SCHEME: LayoutScheme<'static> = LayoutScheme {
                 OutSectScheme {
                     name: ".data",
                     inpsects: &[".data", ".data.*"],
+                    outsect_type: OutSectType::ProgBits,
                 },
                 OutSectScheme {
                     name: ".bss",
                     inpsects: &[".bss", ".bss.*"],
+                    outsect_type: OutSectType::NoBits,
                 },
             ],
         },
@@ -72,14 +76,16 @@ pub enum AddrScheme {
 }
 
 #[derive(Debug)]
+pub enum OutSectType {
+    NoBits, /* no file-backed */
+    ProgBits, /* file-backed */
+}
+
+#[derive(Debug)]
 pub struct OutSectScheme<'a> {
     pub name: &'a str,
     pub inpsects: &'a [&'a str],
-}
-
-pub enum OutSectType {
-    NoBits,
-    ProgBits,
+    pub outsect_type: OutSectType,
 }
 
 #[derive(Debug)]

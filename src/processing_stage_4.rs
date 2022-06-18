@@ -77,14 +77,14 @@ impl<'a> SectionRelocationData<'a> {
                 /* Symbol in .rela has direct link to .symtab */
                 if symbol.st_shndx != STN_UNDEF {
                     let InpSectFileMapping {outsect_token, inpsect_offset_in_outsect_file_part} =
-                        match &self.file.inpsect_to_outsect.get(&inpsect_token) {
+                        match self.file.inpsect_to_outsect.get(&inpsect_token) {
                             None => return e("Symbol from referenced in .rela is not reachable in \
                                               final executable".into()),
-                            Some(mapping) => mapping.clone(),
+                            Some(mapping) => mapping,
                         };
 
                     Symbol {
-                        outsect_token: outsect_token.clone(),
+                        outsect_token: *outsect_token,
                         file_token: self.file.token,
                         outsect_offset: inpsect_offset_in_outsect_file_part + symbol.st_value,
                         /* TODO: placeholder value or fetching the real one */
