@@ -60,10 +60,9 @@ impl<'a> Layout<'a> {
 
     fn match_inpsect(&self, inpsect_name: &str) -> Option<OutSectToken> {
         for (token, matchers) in self.outsect_matchers.tok_iter() {
-            for matcher in matchers {
-                if matcher.is_match(inpsect_name) {
-                    return Some(token);
-                }
+            match matchers.iter().any(|matcher| matcher.is_match(inpsect_name)) {
+                true => return Some(token),
+                false => continue,
             }
         }
 
