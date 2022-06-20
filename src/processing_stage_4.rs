@@ -4,12 +4,12 @@ use std::io::Result as IoResult;
 use std::io::{Error, ErrorKind};
 use vec_map::VecDict;
 
+use crate::elf_file::{ElfRelaAdapter, ElfRelaEntry, ElfSymtabEntry};
+use crate::elf_file::{R_X86_64_32S, R_X86_64_64, R_X86_64_PC32};
+use crate::elf_file::{SHT_PROGBITS, STN_UNDEF};
 use crate::misc::write_ne_at_pos;
 use crate::misc::{FileToken, InpSectToken};
-use crate::elf_file::STN_UNDEF;
-use crate::elf_file::{ElfSymtabEntry, ElfRelaEntry, ElfRelaAdapter};
-use crate::elf_file::{R_X86_64_64, R_X86_64_32S, R_X86_64_PC32};
-use crate::processing_stage_1::{PreprocessedFile, InpSectFileMapping};
+use crate::processing_stage_1::{InpSectFileMapping, PreprocessedFile};
 use crate::processing_stage_2::{Symbol, SymbolMap, SymbolVisibility};
 use crate::processing_stage_3::FinalLayout;
 
@@ -25,25 +25,32 @@ struct SectionRelocationData<'a> {
 
 impl<'a> SectionRelocationData<'a> {
     fn get_rela_address(&self, entry: &ElfRelaEntry, inpsect_token: &InpSectToken) -> u64 {
-        let mapping = &self.file.inpsect_to_outsect[inpsect_token];
-        let outsect = &self.layout.final_outsects[&mapping.outsect_token];
+        match &self.file.inpsect_to_outsect[inpsect_token] {
+            InpSectFileMapping::ProgBits(token, offset) => {
+                let outsect = &self.layout.final_outsects[token];
 
-        /* Address */
-        outsect.virtmem_address
-            + outsect.input_file_slots_offsets[&self.file.token]
-            + mapping.inpsect_offset_in_outsect_file_part
-            + entry.r_offset
+                outsect.progbits_virtmem_address
+                    + outsect.input_file_slots_offsets[&self.file.token].progbits
+                    + offset
+                    + entry.r_offset
+            }
+            InpSectFileMapping::NoBits(_, _) => unreachable!(),
+        }
     }
 
     fn get_rela_offset(&self, entry: &ElfRelaEntry, inpsect_token: &InpSectToken) -> u64 {
-        let mapping = &self.file.inpsect_to_outsect[inpsect_token];
-        let outsect = &self.layout.final_outsects[&mapping.outsect_token];
+        match &self.file.inpsect_to_outsect[inpsect_token] {
+            InpSectFileMapping::ProgBits(token, offset) => {
+                let outsect = &self.layout.final_outsects[token];
 
-        /* Offset */
-        outsect.offset_in_output_file
-            + outsect.input_file_slots_offsets[&self.file.token]
-            + mapping.inpsect_offset_in_outsect_file_part
-            + entry.r_offset
+                /* Offset */
+                outsect.offset_in_output_file
+                    + outsect.input_file_slots_offsets[&self.file.token].progbits
+                    + offset
+                    + entry.r_offset
+            }
+            InpSectFileMapping::NoBits(_, _) => unreachable!(),
+        }
     }
 
     fn relocate_section(&self) -> IoResult<SectionContent> {
@@ -61,6 +68,15 @@ impl<'a> SectionRelocationData<'a> {
             Some(rela_token) => rela_token,
         };
 
+        if section.sh_type != SHT_PROGBITS {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Something went wrong. Trying to relocate section, which is not SHT_PROGBITS\n"
+                ),
+            ));
+        }
+
         let InpSectToken(rela_num) = rela_token;
 
         let rela = ElfRelaAdapter::adapt(rela_num as u16, &self.file.content)?;
@@ -76,20 +92,7 @@ impl<'a> SectionRelocationData<'a> {
             let symbol =
                 /* Symbol in .rela has direct link to .symtab */
                 if symbol.st_shndx != STN_UNDEF {
-                    let InpSectFileMapping {outsect_token, inpsect_offset_in_outsect_file_part} =
-                        match self.file.inpsect_to_outsect.get(&inpsect_token) {
-                            None => return e("Symbol from referenced in .rela is not reachable in \
-                                              final executable".into()),
-                            Some(mapping) => mapping,
-                        };
-
-                    Symbol {
-                        outsect_token: *outsect_token,
-                        file_token: self.file.token,
-                        outsect_offset: inpsect_offset_in_outsect_file_part + symbol.st_value,
-                        /* TODO: placeholder value or fetching the real one */
-                        visibility: SymbolVisibility::Strong,
-                    }
+                    Symbol::new(symbol, self.file)?
                 /* Symbol is defined in separate file: consult the map. */
                 } else {
                     let name = rela.symtab.strtab.get(symbol.st_name)?;

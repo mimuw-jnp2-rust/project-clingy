@@ -11,10 +11,10 @@ use std::io::Error;
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
 
-use crate::misc::{InpSectToken, OutSectToken, FileToken};
-use crate::elf_file::{STN_UNDEF, STB_WEAK, STB_GLOBAL, STB_LOCAL};
-use crate::elf_file::{ElfSymtabEntry, ElfSymtabAdapter};
-use crate::processing_stage_1::PreprocessedFile;
+use crate::elf_file::{ElfSymtabAdapter, ElfSymtabEntry};
+use crate::elf_file::{STB_GLOBAL, STB_LOCAL, STB_WEAK, STN_UNDEF};
+use crate::misc::{FileToken, InpSectToken, OutSectToken};
+use crate::processing_stage_1::{InpSectFileMapping, PreprocessedFile};
 
 pub type SymbolMap = dashmap::DashMap<String, Symbol>;
 
@@ -22,16 +22,58 @@ pub type SymbolMap = dashmap::DashMap<String, Symbol>;
 pub enum SymbolVisibility {
     Strong,
     Weak,
+    Local,
+}
+
+impl SymbolVisibility {
+    fn new(entry: &ElfSymtabEntry) -> Self {
+        match entry.get_stb() {
+            STB_GLOBAL => SymbolVisibility::Strong,
+            STB_WEAK => SymbolVisibility::Weak,
+            STB_LOCAL => SymbolVisibility::Local,
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum SymbolOffset {
+    ProgBits(OutSectToken, u64),
+    NoBits(OutSectToken, u64),
+}
+
+impl SymbolOffset {
+    pub fn from_mapping(entry: &ElfSymtabEntry, mapping: &InpSectFileMapping) -> SymbolOffset {
+        match mapping {
+            InpSectFileMapping::NoBits(token, off) => {
+                SymbolOffset::NoBits(*token, off + entry.st_value)
+            }
+            InpSectFileMapping::ProgBits(token, off) => {
+                SymbolOffset::ProgBits(*token, off + entry.st_value)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Symbol {
-    pub outsect_token: OutSectToken,
+    pub symbol_offset: SymbolOffset,
     pub file_token: FileToken,
-    pub outsect_offset: u64,
     pub visibility: SymbolVisibility,
 }
 
+impl Symbol {
+    pub fn new(entry: &ElfSymtabEntry, file: &PreprocessedFile) -> IoResult<Self> {
+        let symbol_inpsect = InpSectToken(entry.st_shndx as usize);
+        let mapping = file.get_inpsect_file_mapping(symbol_inpsect)?;
+
+        Ok(Symbol {
+            symbol_offset: SymbolOffset::from_mapping(entry, mapping),
+            file_token: file.token,
+            visibility: SymbolVisibility::new(entry),
+        })
+    }
+}
 
 struct InpSectRelativeAddress {
     outsect_num: u16,
@@ -44,24 +86,9 @@ pub fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap
 
     let e = |desc| Err(Error::new(ErrorKind::Other, desc));
 
-    let append_global_symbol = |symbol: &ElfSymtabEntry| {
-        let symbol_inpsect = InpSectToken(symbol.st_shndx as usize);
-
-        let name: &str = symtab.strtab.get(symbol.st_name)?;
-        let mapping = file.get_inpsect_file_mapping(symbol_inpsect)?;
-
-        let symbol_visibility = match symbol.get_stb() {
-            STB_GLOBAL => SymbolVisibility::Strong,
-            STB_WEAK => SymbolVisibility::Weak,
-            _ => unreachable!(),
-        };
-
-        let symbol = Symbol {
-            outsect_token: mapping.outsect_token,
-            outsect_offset: mapping.inpsect_offset_in_outsect_file_part + symbol.st_value,
-            file_token: file.token,
-            visibility: symbol_visibility,
-        };
+    let append_global_symbol = |entry: &ElfSymtabEntry| {
+        let name: &str = symtab.strtab.get(entry.st_name)?;
+        let symbol = Symbol::new(entry, file)?;
 
         use dashmap::mapref::entry::Entry::{Occupied, Vacant};
 
@@ -85,6 +112,7 @@ pub fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap
                         "Strong symbol `{}` is defined multiple times.",
                         name
                     )),
+                    _ => unreachable!()
                 }
             }
         }

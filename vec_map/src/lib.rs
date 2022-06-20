@@ -28,7 +28,7 @@
 */
 
 use std::marker::PhantomData;
-use std::ops::Index;
+use std::ops::{Index, IndexMut};
 
 pub trait NumericIndex {
     fn get_numeric_index(&self) -> usize;
@@ -58,6 +58,7 @@ type InternalIterType<'a, V> =
 type InternalIterMutType<'a, V> =
     Filter<Enumerate<SliceIterMut<'a, Option<V>>>, FilterPredicateMut<V>>;
 
+#[derive(Clone)]
 pub struct TokIter<'a, K, V>
 where
     K: 'a + Token + NumericIndex,
@@ -203,5 +204,14 @@ where
 
     fn index(&self, key: &K) -> &Self::Output {
         self.vector[key.get_numeric_index()].as_ref().unwrap()
+    }
+}
+
+impl<K, V> IndexMut<&K> for VecDict<K, V>
+where
+    K: NumericIndex,
+{
+    fn index_mut(&mut self, key: &K) -> &mut Self::Output {
+        self.vector[key.get_numeric_index()].as_mut().unwrap()
     }
 }

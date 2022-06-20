@@ -4,25 +4,33 @@ use std::io::Result as IoResult;
 use std::io::{Error, ErrorKind};
 use vec_map::VecDict;
 
-use crate::misc::align;
-use crate::misc::{FileToken, SegmentToken, OutSectToken};
-use crate::schemes::AddrScheme;
+use crate::misc::Align;
+use crate::misc::{FileToken, OutSectToken, SegmentToken};
 use crate::processing_stage_1::{Layout, PreprocessedFile};
-use crate::processing_stage_2::Symbol;
-
+use crate::processing_stage_2::{Symbol, SymbolOffset};
+use crate::schemes::AddrScheme;
 
 #[derive(Debug)]
 pub struct FinalSegment {
-    pub size: u64,
+    pub infile_size: u64,
+    pub virtmem_size: u64,
     pub virtmem_address: u64,
     pub offset_in_output_file: u64,
 }
 
 #[derive(Debug, Clone)]
+pub struct SlotsOffset {
+    pub progbits: u64,
+    pub nobits: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct FinalOutSect {
-    pub size: u64,
-    pub input_file_slots_offsets: VecDict<FileToken, u64>,
-    pub virtmem_address: u64,
+    pub progbits_size: u64,
+    pub nobits_size: u64,
+    pub input_file_slots_offsets: VecDict<FileToken, SlotsOffset>,
+    pub progbits_virtmem_address: u64,
+    pub nobits_virtmem_address: u64,
     pub offset_in_output_file: u64,
 }
 
@@ -35,17 +43,93 @@ pub struct FinalLayout<'a> {
 
 impl Symbol {
     pub fn get_symbol_address(&self, layout: &FinalLayout) -> u64 {
-        let Symbol {
-            outsect_token,
-            file_token,
-            outsect_offset, /* outsec_offset == symbol offset + insect offset in outsect file par */
-            visibility: _,
-        } = self;
+        let address = match self.symbol_offset {
+            SymbolOffset::ProgBits(token, offset) => {
+                let outsect = &layout.final_outsects[&token];
+                outsect.progbits_virtmem_address
+                    + outsect.input_file_slots_offsets[&self.file_token].progbits
+                    + offset
+            }
+            SymbolOffset::NoBits(token, offset) => {
+                let outsect = &layout.final_outsects[&token];
+                outsect.nobits_virtmem_address
+                    + outsect.input_file_slots_offsets[&self.file_token].nobits
+                    + offset
+            }
+        };
 
-        let outsect = &layout.final_outsects[outsect_token];
+        address
+    }
+}
 
-        /* Address */
-        outsect.virtmem_address + outsect.input_file_slots_offsets[file_token] + outsect_offset
+type FinalOutSects = VecDict<OutSectToken, FinalOutSect>;
+
+fn append_empty_outsects<'a>(
+    layout: &'a Layout<'a>,
+    preprocessed_files: &'a Vec<PreprocessedFile>,
+) -> FinalOutSects {
+    let files_count = preprocessed_files.len();
+    let mut final_outsects = FinalOutSects::new(layout.outsect_count);
+
+    let is_outsect_present_in_any_file = |token: &OutSectToken| -> bool {
+        preprocessed_files
+            .iter()
+            .any(|file| file.outsects_this_file.contains_key(token))
+    };
+
+    let insert_empty_outsect = |token: OutSectToken| -> () {
+        final_outsects.insert(
+            &token,
+            FinalOutSect {
+                progbits_size: 0,
+                nobits_size: 0,
+                input_file_slots_offsets: VecDict::new(files_count),
+                progbits_virtmem_address: 0,
+                nobits_virtmem_address: 0,
+                offset_in_output_file: 0,
+            },
+        );
+    };
+
+    (0..layout.outsect_count)
+        .map(OutSectToken)
+        .filter(is_outsect_present_in_any_file)
+        .for_each(insert_empty_outsect);
+
+    final_outsects
+}
+
+fn append_input_file_slots<'a>(
+    final_outsects: &mut FinalOutSects,
+    preprocessed_files: &'a Vec<PreprocessedFile>,
+) {
+    for (outsect_token, outsect) in final_outsects.tok_iter_mut() {
+        let mut relative_offset_progbits: u64 = 0;
+        let mut relative_offset_nobits: u64 = 0;
+
+        for file in preprocessed_files
+            .iter()
+            .filter(|file| file.outsects_this_file.contains_key(&outsect_token))
+        {
+            relative_offset_progbits.align_inplace(16); /* TODO: proper alignment */
+            relative_offset_nobits.align_inplace(16); /* TODO: proper alignment */
+
+            outsect
+                .input_file_slots_offsets
+                .insert(
+                    &file.token,
+                    SlotsOffset {
+                        progbits: relative_offset_progbits,
+                        nobits: relative_offset_nobits,
+                    },
+                );
+
+            relative_offset_progbits += file.outsects_this_file[&outsect_token].progbits;
+            relative_offset_nobits += file.outsects_this_file[&outsect_token].nobits;
+        }
+
+        outsect.progbits_size = relative_offset_progbits;
+        outsect.nobits_size = relative_offset_nobits;
     }
 }
 
@@ -53,45 +137,19 @@ pub fn fix_layout<'a>(
     layout: &'a Layout<'a>,
     preprocessed_files: &'a Vec<PreprocessedFile>,
 ) -> IoResult<FinalLayout<'a>> {
-    let files_count = preprocessed_files.len();
-    let mut final_outsects = VecDict::<OutSectToken, FinalOutSect>::new(layout.outsect_count);
+    let mut final_outsects = append_empty_outsects(layout, preprocessed_files);
+    append_input_file_slots(&mut final_outsects, preprocessed_files);
 
-    for num in 0..layout.outsect_count {
-        let token = OutSectToken(num);
-
-        let is_present = preprocessed_files
-            .iter()
-            .any(|file| file.outsects_per_file_size.contains_key(&token));
-
-        if is_present {
-            final_outsects.insert(
-                &token,
-                FinalOutSect {
-                    size: 0,
-                    input_file_slots_offsets: VecDict::new(files_count),
-                    virtmem_address: 0,
-                    offset_in_output_file: 0,
-                },
-            );
-        }
-    }
-
-    for (outsect_token, outsect) in final_outsects.tok_iter_mut() {
-        let mut relative_offset: u64 = 0;
-
-        for file in preprocessed_files.iter() {
-            relative_offset = align(relative_offset, 16); /* TODO: proper alignment */
-            outsect
-                .input_file_slots_offsets
-                .insert(&file.token, relative_offset);
-            relative_offset += file
-                .outsects_per_file_size
-                .get(&outsect_token)
-                .unwrap_or(&0);
-        }
-
-        outsect.size = relative_offset;
-    }
+    let file_too_large_error = |abs_address| {
+        Err(Error::new(
+            ErrorKind::FileTooLarge,
+            format!(
+                "Cannot fit OutSects into LayoutScheme (cannot fit OutSects below \
+                    next OutSect {:#x} virtual address boundary)",
+                abs_address
+            ),
+        ))
+    };
 
     let segment_count = layout.scheme.segments.len();
     let mut final_segments = VecDict::<SegmentToken, FinalSegment>::new(segment_count);
@@ -99,63 +157,74 @@ pub fn fix_layout<'a>(
     let mut current_address = 0x0;
     let mut current_offset_in_file = crate::schemes::MAXPAGESIZE;
 
-    let mut outsects_iter = final_outsects.tok_iter_mut();
+    let mut outsect_num = 0;
 
     for (index, segment) in layout.scheme.segment_iter().enumerate() {
         let token = SegmentToken(index);
 
-        let file_to_large_error = |abs_address| {
-            Err(Error::new(
-                ErrorKind::FileTooLarge,
-                format!(
-                    "Cannot fit OutSects into LayoutScheme (cannot fit OutSects below \
-                                 next OutSect {:#x} virtual address boundary)",
-                    abs_address
-                ),
-            ))
-        };
-
         current_address = match segment.start {
             AddrScheme::Absolute(abs_address) => {
                 if current_address > abs_address {
-                    return file_to_large_error(abs_address);
+                    return file_too_large_error(abs_address);
                 } else {
                     abs_address
                 }
             }
-            AddrScheme::CurrentLocation => align(current_address, segment.alignment),
+            AddrScheme::CurrentLocation => current_address.align(segment.alignment),
         };
 
-        current_offset_in_file = align(current_offset_in_file, segment.alignment);
+        current_offset_in_file.align_inplace(segment.alignment);
 
         let virtmem_address = current_address;
         let offset_in_output_file = current_offset_in_file;
         let mut any_outsect_present_in_segment = false;
 
-        for _ in segment.sections {
-            let next_outsect = match outsects_iter.next() {
-                Some((_, outsect)) => {
+        let outsect_base = outsect_num;
+        outsect_num += segment.sections.len();
+
+        for (outsect_index, _) in segment.sections.iter().enumerate() {
+            let token = OutSectToken(outsect_base + outsect_index);
+
+            let next_outsect = match final_outsects.get_mut(&token) {
+                Some(outsect) => {
                     any_outsect_present_in_segment = true;
                     outsect
                 }
                 None => continue,
             };
 
-            current_address = align(current_address, 16); /* TODO: proper alignment */
-            current_offset_in_file = align(current_offset_in_file, 16); /* TODO: proper alignment */
+            current_address.align_inplace(16); /* TODO: proper alignment */
+            current_offset_in_file.align_inplace(16); /* TODO: proper alignment */
 
-            next_outsect.virtmem_address = current_address;
+            next_outsect.progbits_virtmem_address = current_address;
             next_outsect.offset_in_output_file = current_offset_in_file;
 
-            current_address += next_outsect.size;
-            current_offset_in_file += next_outsect.size;
+            current_address += next_outsect.progbits_size;
+            current_offset_in_file += next_outsect.progbits_size;
+        }
+
+        for (outsect_index, _) in segment.sections.iter().enumerate() {
+            let token = OutSectToken(outsect_base + outsect_index);
+
+            let next_outsect = match final_outsects.get_mut(&token) {
+                Some(outsect) => {
+                    any_outsect_present_in_segment = true;
+                    outsect
+                }
+                None => continue,
+            };
+
+            current_address.align_inplace(16);
+            next_outsect.nobits_virtmem_address = current_address;
+            current_address += next_outsect.nobits_size;
         }
 
         if any_outsect_present_in_segment {
             final_segments.insert(
                 &token,
                 FinalSegment {
-                    size: current_offset_in_file - offset_in_output_file,
+                    infile_size: current_offset_in_file - offset_in_output_file,
+                    virtmem_size: current_address - virtmem_address,
                     virtmem_address,
                     offset_in_output_file,
                 },

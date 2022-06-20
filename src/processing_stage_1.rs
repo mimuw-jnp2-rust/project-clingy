@@ -15,17 +15,31 @@ use vec_map::VecDict;
 use crate::elf_file::{ElfFileContent, ElfSectionEntry, ElfStringTableAdapter};
 use crate::elf_file::{SHT_NOBITS, SHT_NULL, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB};
 
-use crate::misc::align;
+use crate::misc::Align;
 use crate::misc::{FileToken, InpSectToken, OutSectToken};
-use crate::schemes::LayoutScheme;
+use crate::schemes::{LayoutScheme, OutSectScheme};
 
-type OutSectMatchers = VecDict<OutSectToken, Vec<globset::GlobMatcher>>;
+#[derive(Debug)]
+pub struct OutSectMatcher<'a> {
+    pub globs: Vec<globset::GlobMatcher>,
+    pub scheme: &'a OutSectScheme<'a>,
+}
+
+impl OutSectMatcher<'_> {
+    fn matches(&self, inpsect_name: &str) -> bool {
+        self.globs
+            .iter()
+            .any(|matcher| matcher.is_match(inpsect_name))
+    }
+}
+
+type OutSectMatchers<'a> = VecDict<OutSectToken, OutSectMatcher<'a>>;
 
 #[derive(Debug)]
 pub struct Layout<'a> {
     pub scheme: &'a LayoutScheme<'a>,
     pub outsect_count: usize,
-    outsect_matchers: OutSectMatchers,
+    pub outsect_matchers: OutSectMatchers<'a>,
 }
 
 impl<'a> Layout<'a> {
@@ -43,45 +57,69 @@ impl<'a> Layout<'a> {
 
         for (index, outsect_scheme) in scheme.outsect_iter().enumerate() {
             let token = OutSectToken(index);
-            let mut matchers = Vec::new();
+            let mut globs = Vec::new();
 
             for pattern in outsect_scheme.inpsects {
-                let matcher = globset::Glob::new(pattern)
+                let glob = globset::Glob::new(pattern)
                     .map_err(|e| Error::new(ErrorKind::InvalidData, e))?
                     .compile_matcher();
-                matchers.push(matcher);
+
+                globs.push(glob);
             }
 
-            outsect_matchers.insert(&token, matchers);
+            outsect_matchers.insert(
+                &token,
+                OutSectMatcher {
+                    globs,
+                    scheme: outsect_scheme,
+                },
+            );
         }
 
         Ok(outsect_matchers)
     }
 
     fn match_inpsect(&self, inpsect_name: &str) -> Option<OutSectToken> {
-        for (token, matchers) in self.outsect_matchers.tok_iter() {
-            match matchers.iter().any(|matcher| matcher.is_match(inpsect_name)) {
-                true => return Some(token),
-                false => continue,
-            }
-        }
+        self.outsect_matchers
+            .tok_iter()
+            .find_map(|(token, matcher)| {
+                if matcher.matches(inpsect_name) {
+                    return Some(token);
+                } else {
+                    return None;
+                }
+            })
+    }
 
-        None
+    fn match_inpsect_with_err(&self, inpsect_name: &str) -> IoResult<OutSectToken> {
+        self.match_inpsect(inpsect_name).ok_or_else(|| {
+            Error::new(
+                ErrorKind::Other,
+                format!(
+                    "None output section in LayoutScheme matches input section name: {}",
+                    inpsect_name
+                ),
+            )
+        })
     }
 }
 
-/* Every InpSect has assigned relative address consisting of two fields:
- *  (OutSect number,
- *   offset of InpSect in a part of OutSect from the current file*);
- * because a file can have (and often has) several InpSects that will end up in one OutSect. */
 #[derive(Clone, Debug)]
-pub struct InpSectFileMapping {
-    pub outsect_token: OutSectToken,
-    pub inpsect_offset_in_outsect_file_part: u64,
+pub enum InpSectFileMapping {
+    /* (Token, progbits offset of InpSect in a part of OutSect from the current file) */
+    ProgBits(OutSectToken, u64),
+    /* (Token, nobits offset of InpSect in a part of OutSect from the current file) */
+    NoBits(OutSectToken, u64),
+}
+
+#[derive(Clone, Debug)]
+pub struct OutSectThisFileSize {
+    pub progbits: u64,
+    pub nobits: u64,
 }
 
 type InpSectToOutSect = VecDict<InpSectToken, InpSectFileMapping>;
-type OutSectPerFileOffsets = VecDict<OutSectToken, u64>;
+type OutSectThisFileSizes = VecDict<OutSectToken, OutSectThisFileSize>;
 type InpSectToRela = VecDict<InpSectToken, InpSectToken>;
 
 #[derive(Debug)]
@@ -91,13 +129,73 @@ pub struct PreprocessedFile {
     pub symtab_token: InpSectToken,
     pub inpsect_to_outsect: InpSectToOutSect,
     pub inpsect_to_rela: InpSectToRela,
-    pub outsects_per_file_size: OutSectPerFileOffsets,
+    pub outsects_this_file: OutSectThisFileSizes,
 }
 
 impl PreprocessedFile {
+    fn map_progbits_to_outsect(
+        inpsect_token: InpSectToken,
+        outsect_token: OutSectToken,
+        inpsect_size: u64,
+        outsects_this_file: &mut OutSectThisFileSizes,
+        inpsect_to_outsect: &mut InpSectToOutSect,
+    ) {
+        if let None = outsects_this_file.get(&outsect_token) {
+            outsects_this_file.insert(
+                &outsect_token,
+                OutSectThisFileSize {
+                    progbits: 0,
+                    nobits: 0,
+                },
+            )
+        }
+
+        let current_outsect_offset = outsects_this_file[&outsect_token].progbits;
+
+        /* TODO: Alignment. Right now we are aligning to the nearest multiple of 16. Use
+         * real alignment field from InpSect. */
+        let offset_aligned = current_outsect_offset.align(16);
+
+        inpsect_to_outsect.insert(
+            &inpsect_token,
+            InpSectFileMapping::ProgBits(outsect_token, offset_aligned),
+        );
+
+        outsects_this_file[&outsect_token].progbits = offset_aligned + inpsect_size;
+    }
+
+    fn map_nobits_to_outsect(
+        inpsect_token: InpSectToken,
+        outsect_token: OutSectToken,
+        inpsect_size: u64,
+        outsects_this_file: &mut OutSectThisFileSizes,
+        inpsect_to_outsect: &mut InpSectToOutSect,
+    ) {
+        if let None = outsects_this_file.get(&outsect_token) {
+            outsects_this_file.insert(
+                &outsect_token,
+                OutSectThisFileSize {
+                    progbits: 0,
+                    nobits: 0,
+                },
+            )
+        }
+
+        let current_outsect_offset = outsects_this_file[&outsect_token].nobits;
+
+        /* TODO: Alignment. Right now we are aligning to the nearest multiple of 16. Use
+         * real alignment field from InpSect. */
+        let offset_aligned = current_outsect_offset.align(16);
+
+        inpsect_to_outsect.insert(
+            &inpsect_token,
+            InpSectFileMapping::NoBits(outsect_token, offset_aligned),
+        );
+    }
+
     pub fn new(file: &mut std::fs::File, number: usize, layout: &Layout) -> IoResult<Self> {
         let content = ElfFileContent::read(file)?;
-        let mut outsects_per_file_size = OutSectPerFileOffsets::new(layout.outsect_count);
+        let mut outsects_this_file = OutSectThisFileSizes::new(layout.outsect_count);
 
         let header = content.get_elf_header()?;
         let section_names = ElfStringTableAdapter::adapt(header.e_shstrndx, &content)?;
@@ -108,25 +206,6 @@ impl PreprocessedFile {
 
         let e = |desc| Err(Error::new(ErrorKind::Other, desc));
 
-        let mut map_inpsect_to_outsect = |inpsect_token, inpsect_size, outsect_token| {
-            let current_outsect_per_file_size =
-                *outsects_per_file_size.get(&outsect_token).unwrap_or(&0);
-
-            /* TODO: Alignment. Right now we are aligning to the nearest multiple of 16. Use
-             * real alignment field from InpSect. */
-            let offset_aligned = align(current_outsect_per_file_size, 16);
-
-            inpsect_to_outsect.insert(
-                &inpsect_token,
-                InpSectFileMapping {
-                    outsect_token,
-                    inpsect_offset_in_outsect_file_part: offset_aligned,
-                },
-            );
-
-            outsects_per_file_size.insert(&outsect_token, offset_aligned + inpsect_size);
-        };
-
         let mut symtab_token: Option<InpSectToken> = None;
 
         for index in 0..header.e_shnum {
@@ -135,41 +214,52 @@ impl PreprocessedFile {
             let section = content.get_section_entry(index)?;
             PreprocessedFile::section_type_implemented_assert(section)?;
 
-            if let SHT_SYMTAB = section.sh_type {
-                if symtab_token.is_none() {
-                    symtab_token = Some(token)
-                } else {
-                    return e("A file cannot contain more than one symbol table".to_string());
-                }
-            }
-
-            if let SHT_RELA = section.sh_type {
-                let linked_token = InpSectToken(section.sh_info as usize);
-
-                match inpsect_to_rela.get(&linked_token) {
-                    None => inpsect_to_rela.insert(&linked_token, token),
-                    Some(_) => {
-                        return e(format!(
-                            "More than one relocation tables reference section '{}'",
-                            section_names.get(section.sh_name)?
-                        ))
+            match section.sh_type {
+                SHT_SYMTAB => {
+                    if symtab_token.is_none() {
+                        symtab_token = Some(token)
+                    } else {
+                        return e("A file cannot contain more than one symbol table".to_string());
                     }
                 }
-            }
+                SHT_RELA => {
+                    let linked_token = InpSectToken(section.sh_info as usize);
 
-            if let SHT_PROGBITS | SHT_NOBITS = section.sh_type {
-                let name = section_names.get(section.sh_name)?;
-                let outsect_num = layout.match_inpsect(name).ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::Other,
-                        format!(
-                            "None output section in LayoutScheme matches input section name: {}",
-                            name
-                        ),
-                    )
-                })?;
+                    match inpsect_to_rela.get(&linked_token) {
+                        None => inpsect_to_rela.insert(&linked_token, token),
+                        Some(_) => {
+                            return e(format!(
+                                "More than one relocation tables reference section '{}'",
+                                section_names.get(section.sh_name)?
+                            ))
+                        }
+                    }
+                }
+                SHT_PROGBITS => {
+                    let name = section_names.get(section.sh_name)?;
+                    let outsect_token = layout.match_inpsect_with_err(name)?;
 
-                map_inpsect_to_outsect(token, section.sh_size, outsect_num);
+                    PreprocessedFile::map_progbits_to_outsect(
+                        token,
+                        outsect_token,
+                        section.sh_size,
+                        &mut outsects_this_file,
+                        &mut inpsect_to_outsect,
+                    );
+                }
+                SHT_NOBITS => {
+                    let name = section_names.get(section.sh_name)?;
+                    let outsect_token = layout.match_inpsect_with_err(name)?;
+
+                    PreprocessedFile::map_nobits_to_outsect(
+                        token,
+                        outsect_token,
+                        section.sh_size,
+                        &mut outsects_this_file,
+                        &mut inpsect_to_outsect,
+                    );
+                }
+                _ => (),
             }
         }
 
@@ -184,7 +274,7 @@ impl PreprocessedFile {
             symtab_token,
             inpsect_to_outsect,
             inpsect_to_rela,
-            outsects_per_file_size,
+            outsects_this_file,
         })
     }
 

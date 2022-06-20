@@ -1,5 +1,16 @@
-pub fn align(num: u64, bound: u64) -> u64 {
-    ((num + (bound - 1)) / bound) * bound
+pub trait Align {
+     fn align(&self, bound: Self) -> Self;
+     fn align_inplace(&mut self, bound: Self);
+}
+
+impl Align for u64 {
+    fn align(&self, bound: u64) -> u64 {
+        ((*self + (bound - 1)) / bound) * bound
+    }
+
+    fn align_inplace(&mut self, bound: u64) {
+        *self = self.align(bound)
+    }
 }
 
 use vec_map_derive::{Token, NumericIndex};

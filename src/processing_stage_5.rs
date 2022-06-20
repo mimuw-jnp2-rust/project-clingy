@@ -1,17 +1,17 @@
 /* Stage 5. Create executable. */
 
-use std::io::{Seek, SeekFrom, Write, Error, ErrorKind};
 use std::io::Result as IoResult;
+use std::io::{Error, ErrorKind, Seek, SeekFrom, Write};
 
 use crate::elf_file::PT_LOAD;
-use crate::elf_file::{PF_EXEC, PF_READ, PF_WRITE};
 use crate::elf_file::{ElfHeader, ElfProgramHeaderEntry};
-use crate::misc::{align, SegmentToken};
+use crate::elf_file::{PF_EXEC, PF_READ, PF_WRITE};
+use crate::misc::{Align, SegmentToken};
 use crate::schemes::MAXPAGESIZE;
 
 use crate::processing_stage_1::InpSectFileMapping;
 use crate::processing_stage_2::SymbolMap;
-use crate::processing_stage_3::{FinalOutSect, FinalLayout};
+use crate::processing_stage_3::{FinalLayout, FinalOutSect};
 use crate::processing_stage_4::RelocatedFile;
 
 pub fn generate_output_executable(
@@ -74,14 +74,14 @@ pub fn generate_output_executable(
         e_shstrndx: 0,
     };
 
-    let segments_offset = align(prolog_size as u64, MAXPAGESIZE);
+    let segments_offset = (prolog_size as u64).align(MAXPAGESIZE);
 
     let file_size = layout
         .final_segments
         .tok_iter()
         .map(|(_, segment)| segment)
         .fold(segments_offset, |acc, segment| {
-            align(acc, MAXPAGESIZE) + segment.size
+            acc.align(MAXPAGESIZE) + segment.infile_size
         });
 
     let mut final_content = vec![0u8; file_size as usize];
@@ -102,8 +102,8 @@ pub fn generate_output_executable(
             p_offset: segment.offset_in_output_file,
             p_vaddr: segment.virtmem_address,
             p_paddr: segment.virtmem_address,
-            p_filesz: segment.size,
-            p_memsz: segment.size,
+            p_filesz: segment.infile_size,
+            p_memsz: segment.virtmem_size,
             p_align: scheme.alignment,
         };
 
@@ -115,27 +115,27 @@ pub fn generate_output_executable(
 
     for file in relocated_files {
         for (token, section_content) in file.inpsects.tok_iter() {
-            let InpSectFileMapping {
-                outsect_token: token,
-                inpsect_offset_in_outsect_file_part,
-            } = match file.preprocessed.inpsect_to_outsect.get(&token) {
-                Some(mapping) => mapping,
-                None => continue,
-            };
+                let mapping = match file.preprocessed.inpsect_to_outsect.get(&token) {
+                    Some(mapping) => mapping,
+                    None => continue,
+                };
 
-            let FinalOutSect {
-                size: _,
-                input_file_slots_offsets,
-                virtmem_address: _,
-                offset_in_output_file,
-            } = &layout.final_outsects[token];
+            match mapping {
+                InpSectFileMapping::ProgBits(token, inpsect_this_file_offset) => {
+                    let final_outsect = &layout.final_outsects[token];
 
-            let inpsect_start = offset_in_output_file
-                + inpsect_offset_in_outsect_file_part
-                + input_file_slots_offsets[&file.preprocessed.token];
+                    let inpsect_start = final_outsect.offset_in_output_file
+                        + inpsect_this_file_offset
+                        + final_outsect.input_file_slots_offsets[&file.preprocessed.token].progbits;
 
-            content_writer.seek(SeekFrom::Start(inpsect_start))?;
-            content_writer.write_all(section_content)?;
+                    content_writer.seek(SeekFrom::Start(inpsect_start))?;
+                    content_writer.write_all(section_content)?;
+                }
+
+                InpSectFileMapping::NoBits(_, _) => {
+                    () /* NoBits sections are not outputed, obviously */
+                }
+            }
         }
     }
 
