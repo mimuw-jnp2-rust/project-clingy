@@ -9,6 +9,10 @@ executable.
 
 ## Changelog
 
+#### 20.06.2022
+ * `NOBITS` (`.bss`) support
+ * Refactoring so that the code looks nicer and is more idiomatic.
+
 #### 17.06.2022
  * Added `vec_map` crate and introduced `newtype` pattern to ensure type safety.
 
@@ -24,9 +28,10 @@ executable.
 ## Demonstration
 
 ```
+> cd examples
 > nasm -w+all -f elf64 -o data_and_exit.o data_and_exit.asm
 > nasm -w+all -f elf64 -o hello_world.o hello_world.asm
-> target/debug/project-clingy hello_world.o data_and_exit.o output
+> ../target/debug/project-clingy hello_world.o data_and_exit.o output
 
 [1/5] preprocessing files
 [2/5] fixing layout
@@ -45,24 +50,42 @@ relocation:
 
 > ./output
 Hello, cruel world!⏎
->
+```
+
+#### Longer example with `GCC`
+
+```
+> cd examples
+> nasm -w+all -f elf64 -o with_bss.o with_bss.asm
+> gcc -c -Wall -Wextra -nostdlib -fno-stack-protector helper.c -o helper.o
+> for i in ".comment" ".note.gnu.property" ".note.GNU-stack" ".rela.eh_frame" ".eh_frame" 
+  do
+      objcopy --remove-section $i helper.o
+  done
+> ../target/debug/project-clingy with_bss.o helper.o output2
+
+[1/5] preprocessing files
+[2/5] fixing layout
+[3/5] gathering all symbols
+[4/5] relocating
+... 12 relocations, logs ommited for brevity
+[5/5] outputing
+
+> ./output2
+2137⏎
 ```
 
 ## Roadmap
 
-#### 19.06.2022
- * `NOBITS` (`.bss`) support
- * All TODOs fixed. Error reporting improved. Refactoring so that the code looks
-   nicer and is more idiomatic.
+#### 24.06.2022
+ * All TODOs fixed. Error reporting improved. 
  * Tests.
-
-#### 21.06.2022
  * CLI in `clamp`
+
+#### Probably can't make it by the end of the semester (but I plan to continue after the course;))
  * Merging .symtabs from different files into one .symtab. (Binaries generated
    by clingy are stripped right now: we are not outputing .symtab. That has to
    be changed).
-
-#### Probably can't make it by the end of the semester (but I plan to continue after the course;))
  * Support for static library archives (.a) and libc.
  * Generating .GOT and .PLT, linking with shared libraries, PIE support.
  * Slowly moving to a feature-complete linker: support for things like handling
