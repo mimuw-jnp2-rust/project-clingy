@@ -129,10 +129,10 @@ pub fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap
 
 impl ErrorCollection {
     fn symbol_defined_multiple_times(name: &str) -> Error {
-        anyhow!("Strong symbol `{}` is defined multiple times.", name)
+        anyhow!("Strong symbol `{}` is defined multiple times", name)
     }
 
     fn unrecognized_symbol_bind(name: &str) -> Error {
-        anyhow!("Unrecognized symbol `{}` bind.", name)
+        anyhow!("Unrecognized symbol `{}` bind", name)
     }
 }

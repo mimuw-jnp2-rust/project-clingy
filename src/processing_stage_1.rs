@@ -277,7 +277,7 @@ impl ErrorCollection {
 
     fn multiple_relocation_tables(name: &str) -> Error {
         anyhow!(
-            "More than one relocation tables reference section '{}'",
+            "More than one relocation table references section '{}'",
             name,
         )
     }
@@ -291,6 +291,6 @@ impl ErrorCollection {
     }
 
     fn no_mapping() -> Error {
-        anyhow!("Cannot find input section mapping. Something went wrong.")
+        anyhow!("Cannot find input section mapping; something went wrong")
     }
 }

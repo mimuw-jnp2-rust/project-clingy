@@ -9,6 +9,11 @@ executable.
 
 ## Changelog
 
+#### 26.06.2022
+ * More detailed and robust error handling. CLI in `clap`.
+ * Most TODOs fixed.
+ * Bugfixing.
+
 #### 20.06.2022
  * `NOBITS` (`.bss`) support
  * Refactoring so that the code looks nicer and is more idiomatic.
@@ -31,7 +36,7 @@ executable.
 > cd examples
 > nasm -w+all -f elf64 -o data_and_exit.o data_and_exit.asm
 > nasm -w+all -f elf64 -o hello_world.o hello_world.asm
-> ../target/debug/project-clingy hello_world.o data_and_exit.o output
+> ../target/debug/project-clingy hello_world.o data_and_exit.o -o output
 
 [1/5] preprocessing files
 [2/5] fixing layout
@@ -62,7 +67,7 @@ Hello, cruel world!⏎
   do
       objcopy --remove-section $i helper.o
   done
-> ../target/debug/project-clingy with_bss.o helper.o output2
+> ../target/debug/project-clingy with_bss.o helper.o -o output2
 
 [1/5] preprocessing files
 [2/5] fixing layout
@@ -77,20 +82,22 @@ Hello, cruel world!⏎
 
 ## Roadmap
 
-#### 24.06.2022
- * All TODOs fixed. Error reporting improved. 
- * Tests.
- * CLI in `clap`
-
-#### Probably can't make it by the end of the semester (but I plan to continue after the course;))
+#### What I was not able to implement by the end of the semester.
+ * Alignment (the remaining `TODO`s).
  * Merging .symtabs from different files into one .symtab. (Binaries generated
    by clingy are stripped right now: we are not outputing .symtab. That has to
    be changed).
- * Support for static library archives (.a) and libc.
+ * Tests.
+
+For some of those things I'm still not sure how to do it right - it requires
+some digging on my part and recently I'm running out of time.
+
+#### Future (hopefully;))
+ * Support for static library archives (.a) and libc. Ability to link standalone
+   C programs.
  * Generating .GOT and .PLT, linking with shared libraries, PIE support.
  * Slowly moving to a feature-complete linker: support for things like handling
    COMDAT sections for example.
  * Feature-complete linker: ability to link Chromium. Full-fledged support for
    linking scripts. More architectures. Simple LTOs like Mark&Sweep from entry
    symbol to remove unused sections.
-
