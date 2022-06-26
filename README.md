@@ -80,7 +80,7 @@ Hello, cruel world!⏎
 #### 24.06.2022
  * All TODOs fixed. Error reporting improved. 
  * Tests.
- * CLI in `clamp`
+ * CLI in `clap`
 
 #### Probably can't make it by the end of the semester (but I plan to continue after the course;))
  * Merging .symtabs from different files into one .symtab. (Binaries generated

@@ -3,6 +3,9 @@
 #![feature(mixed_integer_ops)]
 #[macro_use]
 extern crate macro_attr;
+extern crate clap;
+
+use clap::{arg, Command};
 
 mod elf_file;
 mod misc;
@@ -26,17 +29,10 @@ use rayon::iter::IndexedParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 
-fn main() {
+use clap::Parser;
+
+fn link(output_filename: &str, input_filenames: Vec<&String>) {
     let default_layout: Layout = Layout::new(&DEFAULT_SCHEME).unwrap();
-    let args: Vec<String> = std::env::args().collect();
-
-    if args.len() < 3 {
-        println!("Usage: relocatable_files... executable_file");
-        std::process::exit(1);
-    }
-
-    let input_filenames = &args[1..args.len() - 1];
-    let output_filename = &args[args.len() - 1];
 
     println!("[1/5] preprocessing files");
 
@@ -79,4 +75,17 @@ fn main() {
     let mut output_file = options.open(output_filename).unwrap();
 
     output_file.write_all(&output).unwrap();
+}
+
+fn main() {
+    let matches = Command::new("clingy")
+        .about("simple linker for elf")
+        .arg(arg!(output: -o --output <output_file> "output filename"))
+        .arg(arg!(input: <input_file> ... "input filenames"))
+        .get_matches();
+
+    let output_file: &String = matches.get_one("output").unwrap();
+    let input_files: Vec<&String> = matches.get_many("input").unwrap().collect();
+
+    link(output_file, input_files);
 }
