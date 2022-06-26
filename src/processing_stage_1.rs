@@ -82,9 +82,9 @@ impl<'a> Layout<'a> {
             .tok_iter()
             .find_map(|(token, matcher)| {
                 if matcher.matches(inpsect_name) {
-                    return Some(token);
+                    Some(token)
                 } else {
-                    return None;
+                    None
                 }
             })
     }
@@ -128,7 +128,7 @@ impl<'a> PreprocessedFile<'a> {
         outsects_this_file: &mut OutSectThisFile,
         inpsect_to_outsect: &mut InpSectToOutSect,
     ) {
-        if let None = outsects_this_file.get(&outsect_token) {
+        if outsects_this_file.get(&outsect_token).is_none() {
             outsects_this_file.insert(&outsect_token, OutSectThisFileInfo::default())
         }
 

@@ -45,7 +45,7 @@ pub struct FinalLayout<'a> {
 
 impl Symbol {
     pub fn get_symbol_address(&self, layout: &FinalLayout) -> u64 {
-        let address = match self.symbol_offset {
+        match self.symbol_offset {
             SymbolOffset::ProgBits(token, offset) => {
                 let outsect = &layout.final_outsects[&token];
                 outsect.progbits_virtmem_address
@@ -58,9 +58,7 @@ impl Symbol {
                     + outsect.input_file_slots_offsets[&self.file_token].nobits
                     + offset
             }
-        };
-
-        address
+        }
     }
 }
 
@@ -79,7 +77,7 @@ fn append_empty_outsects<'a>(
             .any(|file| file.outsects_this_file.contains_key(token))
     };
 
-    let insert_empty_outsect = |token: OutSectToken| -> () {
+    let insert_empty_outsect = |token: OutSectToken| {
         final_outsects.insert(
             &token,
             FinalOutSect {
@@ -104,7 +102,7 @@ fn append_empty_outsects<'a>(
 
 fn append_input_file_slots<'a>(
     final_outsects: &mut FinalOutSects,
-    preprocessed_files: &'a Vec<PreprocessedFile>,
+    preprocessed_files: &'a [PreprocessedFile],
 ) {
     for (outsect_token, outsect) in final_outsects.tok_iter_mut() {
         let mut relative_offset_progbits: u64 = 0;

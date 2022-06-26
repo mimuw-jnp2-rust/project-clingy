@@ -37,7 +37,7 @@ impl ErrorCollection {
     }
 
     fn invalid_layout(payload: Error) -> Error {
-        payload.context(format!("Error in provided LayoutScheme"))
+        payload.context("Error in provided LayoutScheme")
     }
 
     fn preprocessing(filename: &str, payload: Error) -> Error {
@@ -52,7 +52,7 @@ impl ErrorCollection {
     }
 
     fn fixing_layout(payload: Error) -> Error {
-        payload.context(format!("Error while creating final executable layout"))
+        payload.context("Error while creating final executable layout")
     }
 
     fn relocating(filename: &str, payload: Error) -> Error {
@@ -77,7 +77,7 @@ fn run_stage_1<'a>(
             let mut file =
                 std::fs::File::open(filename).map_err(|e| ErrorCollection::open(filename, e))?;
 
-            PreprocessedFile::new(filename, &mut file, number, &layout)
+            PreprocessedFile::new(filename, &mut file, number, layout)
                 .map_err(|e| ErrorCollection::preprocessing(filename, e))
         })
         .collect()
@@ -101,7 +101,7 @@ fn run_stage_3<'a>(
     preprocessed_files: &'a Vec<PreprocessedFile>,
 ) -> Result<FinalLayout<'a>> {
     println!("[3/5] fixing layout");
-    fix_layout(&layout, &preprocessed_files).map_err(ErrorCollection::fixing_layout)
+    fix_layout(layout, preprocessed_files).map_err(ErrorCollection::fixing_layout)
 }
 
 fn run_stage_4<'a>(
@@ -114,7 +114,7 @@ fn run_stage_4<'a>(
     preprocessed_files
         .par_iter()
         .map(|file| {
-            RelocatedFile::process(file, &final_layout, &symbol_map)
+            RelocatedFile::process(file, final_layout, symbol_map)
                 .map_err(|e| ErrorCollection::relocating(file.filename, e))
         })
         .collect()
@@ -128,7 +128,7 @@ fn run_stage_5<'a>(
 ) -> Result<()> {
     println!("[5/5] outputing");
 
-    let output = generate_output_executable(&relocated_files, &final_layout, &symbol_map)
+    let output = generate_output_executable(relocated_files, final_layout, symbol_map)
         .map_err(|e| ErrorCollection::output_final_executable(output_filename, e))?;
 
     use std::fs::OpenOptions;

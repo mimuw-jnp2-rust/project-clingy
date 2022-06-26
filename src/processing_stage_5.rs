@@ -125,7 +125,7 @@ pub fn generate_output_executable(
                 }
 
                 InpSectFileMapping::NoBits(_, _) => {
-                    () /* NoBits sections are not outputed, obviously */
+                    /* NoBits sections are not outputed, obviously */
                 }
             }
         }

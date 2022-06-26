@@ -89,7 +89,7 @@ impl Permissions {
         perm
     }
 
-    pub fn to_elf_pf(&self) -> u32 {
+    pub fn to_elf_pf(self) -> u32 {
         let mut flags: u32 = 0;
 
         if self.contains(Permissions::R) {
