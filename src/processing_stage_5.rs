@@ -1,7 +1,7 @@
 /* Stage 5. Create executable. */
 
-use std::io::Result as IoResult;
-use std::io::{Error, ErrorKind, Seek, SeekFrom, Write};
+use anyhow::{anyhow, bail, Result};
+use std::io::{Seek, SeekFrom, Write};
 
 use crate::elf_file::PT_LOAD;
 use crate::elf_file::{ElfHeader, ElfProgramHeaderEntry};
@@ -17,7 +17,7 @@ pub fn generate_output_executable(
     relocated_files: &Vec<RelocatedFile>,
     layout: &FinalLayout,
     symbol_map: &SymbolMap,
-) -> IoResult<Vec<u8>> {
+) -> Result<Vec<u8>> {
     let elf_header_size = std::mem::size_of::<ElfHeader>();
 
     let prolog_size = {
@@ -28,24 +28,17 @@ pub fn generate_output_executable(
     };
 
     if prolog_size > 0x1000 {
-        return Err(Error::new(
-            ErrorKind::StorageFull,
-            format!(
-                "For now the whole 'prolog' (file header, \
-                 section headers, program headers) have to fit in MAGPAGESIZE: {:#x}",
-                MAXPAGESIZE
-            ),
-        ));
+        bail!(
+            "Cannot fit file header, section headers and program headers \
+             in MAGPAGESIZE: {:#x}; for now, the whole (`prolog`) has to fit \
+             in MAGPAGESIZE",
+            MAXPAGESIZE
+        );
     }
 
     let start = symbol_map
         .get("_start")
-        .ok_or_else(|| {
-            Error::new(
-                ErrorKind::NotFound,
-                "Cannot find _start symbol in the relocated files",
-            )
-        })?
+        .ok_or_else(|| anyhow!("Cannot find `_start` symbol"))?
         .value()
         .get_symbol_address(layout);
 

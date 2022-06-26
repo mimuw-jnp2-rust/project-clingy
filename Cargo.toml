@@ -14,3 +14,4 @@ rayon = "1.5.3"
 vec_map = { version = "0.1.0", path = "vec_map" }
 vec_map-derive = { version = "0.1.0", path = "vec_map-derive" }
 clap = "3.2.6"
+anyhow = "1.0.58"

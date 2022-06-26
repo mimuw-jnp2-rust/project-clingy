@@ -1,7 +1,6 @@
 /* Stage 3. Fix virtual memory layout. Assign addresses to every Segment and OutSect. */
 
-use std::io::Result as IoResult;
-use std::io::{Error, ErrorKind};
+use anyhow::{anyhow, bail, Error, Result};
 use vec_map::VecDict;
 
 use crate::misc::Align;
@@ -139,19 +138,16 @@ fn append_input_file_slots<'a>(
 pub fn fix_layout<'a>(
     layout: &'a Layout<'a>,
     preprocessed_files: &'a Vec<PreprocessedFile>,
-) -> IoResult<FinalLayout<'a>> {
+) -> Result<FinalLayout<'a>> {
     let mut final_outsects = append_empty_outsects(layout, preprocessed_files);
     append_input_file_slots(&mut final_outsects, preprocessed_files);
 
-    let file_too_large_error = |abs_address| {
-        Err(Error::new(
-            ErrorKind::FileTooLarge,
-            format!(
-                "Cannot fit OutSects into LayoutScheme (cannot fit OutSects below \
-                    next OutSect {:#x} virtual address boundary)",
-                abs_address
-            ),
-        ))
+    let outsect_too_large_error = |abs_address| {
+        bail!(
+            "Cannot fit OutSects into LayoutScheme (cannot fit OutSects below \
+             next OutSect {:#x} virtual address boundary)",
+            abs_address
+        );
     };
 
     let segment_count = layout.scheme.segments.len();
@@ -168,7 +164,7 @@ pub fn fix_layout<'a>(
         current_address = match segment.start {
             AddrScheme::Absolute(abs_address) => {
                 if current_address > abs_address {
-                    return file_too_large_error(abs_address);
+                    return outsect_too_large_error(abs_address);
                 } else {
                     abs_address
                 }

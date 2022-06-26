@@ -7,13 +7,11 @@
  * referenced in .rela table).
  */
 
-use std::io::Error;
-use std::io::ErrorKind;
-use std::io::Result as IoResult;
+use anyhow::{anyhow, Error, Result};
 
 use crate::elf_file::{ElfSymtabAdapter, ElfSymtabEntry};
 use crate::elf_file::{STB_GLOBAL, STB_LOCAL, STB_WEAK, STN_UNDEF};
-use crate::misc::{FileToken, InpSectToken, OutSectToken};
+use crate::misc::{ErrorCollection, FileToken, InpSectToken, OutSectToken};
 use crate::processing_stage_1::{InpSectFileMapping, PreprocessedFile};
 
 pub type SymbolMap = dashmap::DashMap<String, Symbol>;
@@ -63,7 +61,7 @@ pub struct Symbol {
 }
 
 impl Symbol {
-    pub fn new(entry: &ElfSymtabEntry, file: &PreprocessedFile) -> IoResult<Self> {
+    pub fn new(entry: &ElfSymtabEntry, file: &PreprocessedFile) -> Result<Self> {
         let symbol_inpsect = InpSectToken(entry.st_shndx as usize);
         let mapping = file.get_inpsect_file_mapping(symbol_inpsect)?;
 
@@ -80,11 +78,9 @@ struct InpSectRelativeAddress {
     offset: u64,
 }
 
-pub fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap) -> IoResult<()> {
+pub fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap) -> Result<()> {
     let InpSectToken(symtab_index) = file.symtab_token;
     let symtab = ElfSymtabAdapter::adapt(symtab_index as u16, &file.content)?;
-
-    let e = |desc| Err(Error::new(ErrorKind::Other, desc));
 
     let append_global_symbol = |entry: &ElfSymtabEntry| {
         let name: &str = symtab.strtab.get(entry.st_name)?;
@@ -108,10 +104,7 @@ pub fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap
                         entry.insert(symbol);
                         Ok(())
                     }
-                    (Strong, Strong) => e(format!(
-                        "Strong symbol `{}` is defined multiple times.",
-                        name
-                    )),
+                    (Strong, Strong) => Err(ErrorCollection::symbol_defined_multiple_times(name)),
                     _ => unreachable!(),
                 }
             }
@@ -129,9 +122,22 @@ pub fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap
         match symbol.get_stb() {
             STB_LOCAL => (),
             STB_GLOBAL | STB_WEAK => append_global_symbol(symbol)?,
-            _ => return e("Unrecognized symbol bind".to_string()),
+            _ => {
+                let name = symtab.strtab.get(symbol.st_name).unwrap_or("");
+                return Err(ErrorCollection::unrecognized_symbol_bind(name))
+            }
         }
     }
 
     Ok(())
+}
+
+impl ErrorCollection {
+    fn symbol_defined_multiple_times(name: &str) -> Error {
+        anyhow!("Strong symbol `{}` is defined multiple times.", name)
+    }
+
+    fn unrecognized_symbol_bind(name: &str) -> Error {
+        anyhow!("Unrecognized symbol `{}` bind.", name)
+    }
 }

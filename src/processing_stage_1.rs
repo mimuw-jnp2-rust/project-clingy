@@ -7,15 +7,13 @@
  * provided LayoutScheme, computing the size occupied in every OutSect by this file).
  */
 
-use std::io::Error;
-use std::io::ErrorKind;
-use std::io::Result as IoResult;
+use std::fmt::Display;
 use vec_map::VecDict;
+use anyhow::{Error, Result, anyhow};
 
 use crate::elf_file::{ElfFileContent, ElfSectionEntry, ElfStringTableAdapter};
 use crate::elf_file::{SHT_NOBITS, SHT_NULL, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB};
-use crate::misc::Align;
-use crate::misc::Permissions;
+use crate::misc::{Align, ErrorCollection, Permissions};
 use crate::misc::{FileToken, InpSectToken, OutSectToken};
 use crate::schemes::{LayoutScheme, OutSectScheme};
 
@@ -43,7 +41,7 @@ pub struct Layout<'a> {
 }
 
 impl<'a> Layout<'a> {
-    pub fn new(scheme: &'a LayoutScheme<'a>) -> IoResult<Self> {
+    pub fn new(scheme: &'a LayoutScheme<'a>) -> Result<Self> {
         Ok(Layout {
             scheme,
             outsect_count: scheme.outsect_iter().count(),
@@ -51,7 +49,7 @@ impl<'a> Layout<'a> {
         })
     }
 
-    fn generate_outsects_matchers(scheme: &'a LayoutScheme<'a>) -> IoResult<OutSectMatchers> {
+    fn generate_outsects_matchers(scheme: &'a LayoutScheme<'a>) -> Result<OutSectMatchers> {
         let outsect_count = scheme.outsect_iter().count();
         let mut outsect_matchers = OutSectMatchers::new(outsect_count);
 
@@ -61,7 +59,7 @@ impl<'a> Layout<'a> {
 
             for pattern in outsect_scheme.inpsects {
                 let glob = globset::Glob::new(pattern)
-                    .map_err(|e| Error::new(ErrorKind::InvalidData, e))?
+                    .map_err(|e| ErrorCollection::glob(outsect_scheme.name, &e))?
                     .compile_matcher();
 
                 globs.push(glob);
@@ -90,18 +88,6 @@ impl<'a> Layout<'a> {
                 }
             })
     }
-
-    fn match_inpsect_with_err(&self, inpsect_name: &str) -> IoResult<OutSectToken> {
-        self.match_inpsect(inpsect_name).ok_or_else(|| {
-            Error::new(
-                ErrorKind::Other,
-                format!(
-                    "None output section in LayoutScheme matches input section name: {}",
-                    inpsect_name
-                ),
-            )
-        })
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -124,7 +110,8 @@ type OutSectThisFile = VecDict<OutSectToken, OutSectThisFileInfo>;
 type InpSectToRela = VecDict<InpSectToken, InpSectToken>;
 
 #[derive(Debug)]
-pub struct PreprocessedFile {
+pub struct PreprocessedFile<'a> {
+    pub filename: &'a str,
     pub token: FileToken,
     pub content: ElfFileContent,
     pub symtab_token: InpSectToken,
@@ -133,7 +120,7 @@ pub struct PreprocessedFile {
     pub outsects_this_file: OutSectThisFile,
 }
 
-impl PreprocessedFile {
+impl<'a> PreprocessedFile<'a> {
     fn map_inpsect_to_outsect(
         inpsect_token: InpSectToken,
         outsect_token: OutSectToken,
@@ -168,7 +155,7 @@ impl PreprocessedFile {
         );
     }
 
-    pub fn new(file: &mut std::fs::File, number: usize, layout: &Layout) -> IoResult<Self> {
+    pub fn new(filename: &'a str, file: &mut std::fs::File, number: usize, layout: &Layout) -> Result<Self> {
         let content = ElfFileContent::read(file)?;
         let mut outsects_this_file = OutSectThisFile::new(layout.outsect_count);
 
@@ -179,22 +166,19 @@ impl PreprocessedFile {
         let mut inpsect_to_outsect = InpSectToOutSect::new(inpsects_count);
         let mut inpsect_to_rela = InpSectToRela::new(inpsects_count);
 
-        let e = |desc| Err(Error::new(ErrorKind::Other, desc));
-
         let mut symtab_token: Option<InpSectToken> = None;
 
         for index in 0..header.e_shnum {
             let token = InpSectToken(index as usize);
-
             let section = content.get_section_entry(index)?;
-            PreprocessedFile::section_type_implemented_assert(section)?;
 
+            PreprocessedFile::section_type_implemented_assert(section, &section_names)?;
             match section.sh_type {
                 SHT_SYMTAB => {
                     if symtab_token.is_none() {
                         symtab_token = Some(token)
                     } else {
-                        return e("A file cannot contain more than one symbol table".to_string());
+                        return Err(ErrorCollection::multiple_symbol_tables());
                     }
                 }
                 SHT_RELA => {
@@ -203,16 +187,16 @@ impl PreprocessedFile {
                     match inpsect_to_rela.get(&linked_token) {
                         None => inpsect_to_rela.insert(&linked_token, token),
                         Some(_) => {
-                            return e(format!(
-                                "More than one relocation tables reference section '{}'",
-                                section_names.get(section.sh_name)?
-                            ))
+                            let name = section_names.get(section.sh_name).unwrap_or("");
+                            return Err(ErrorCollection::multiple_relocation_tables(name));
                         }
                     }
                 }
                 SHT_PROGBITS | SHT_NOBITS => {
                     let name = section_names.get(section.sh_name)?;
-                    let outsect_token = layout.match_inpsect_with_err(name)?;
+                    let outsect_token = layout
+                        .match_inpsect(name)
+                        .ok_or_else(|| ErrorCollection::inpsect_match(name))?;
 
                     PreprocessedFile::map_inpsect_to_outsect(
                         token,
@@ -227,13 +211,14 @@ impl PreprocessedFile {
         }
 
         let symtab_token = match symtab_token {
-            None => return e("A file must contain a symbol table".to_string()),
+            None => return Err(ErrorCollection::no_symbol_tables()),
             Some(token) => token,
         };
 
         Ok(PreprocessedFile {
-            content,
+            filename,
             token: FileToken(number),
+            content,
             symtab_token,
             inpsect_to_outsect,
             inpsect_to_rela,
@@ -241,21 +226,66 @@ impl PreprocessedFile {
         })
     }
 
-    fn section_type_implemented_assert(section: &ElfSectionEntry) -> IoResult<()> {
-        let e = |desc| Err(Error::new(ErrorKind::Other, desc));
-
+    fn section_type_implemented_assert(
+        section: &ElfSectionEntry,
+        names: &ElfStringTableAdapter,
+    ) -> Result<()> {
         match section.sh_type {
             SHT_PROGBITS | SHT_NOBITS | SHT_NULL | SHT_STRTAB | SHT_SYMTAB | SHT_RELA => Ok(()),
-            _ => e("Cannot recognize some section header type (not implemented yet)".to_string()),
+            _ => {
+                let name = names.get(section.sh_name).unwrap_or("");
+                Err(ErrorCollection::inpsect_not_implemented(name))
+            }
         }
     }
 
-    pub fn get_inpsect_file_mapping(&self, token: InpSectToken) -> IoResult<&InpSectFileMapping> {
-        self.inpsect_to_outsect.get(&token).ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                "Entry in symbol table points to a special section.",
-            )
-        })
+    pub fn get_inpsect_file_mapping(&self,  token: InpSectToken) -> Result<&InpSectFileMapping> {
+        self.inpsect_to_outsect.get(&token).ok_or_else(ErrorCollection::no_mapping)
+    }
+}
+
+pub enum PreprocessingError {}
+
+impl ErrorCollection {
+    fn glob<Payload: Display>(name: &str, payload: &Payload) -> Error {
+        anyhow!(
+            "When parsing LayoutScheme and creating glob matcher for OutScheme name '{}': {}",
+            name,
+            payload
+        )
+    }
+
+    fn inpsect_match(inpsect_name: &str) -> Error {
+        anyhow!(
+            "None output section in LayoutScheme matches input section name '{}'",
+            inpsect_name
+        )
+    }
+
+    fn inpsect_not_implemented(name: &str) -> Error {
+        anyhow!(
+            "Cannot recognize section type of input section '{}' (probably it has not been \
+             implemented yet)",
+            name,
+        )
+    }
+
+    fn multiple_relocation_tables(name: &str) -> Error {
+        anyhow!(
+            "More than one relocation tables reference section '{}'",
+            name,
+        )
+    }
+
+    fn no_symbol_tables() -> Error {
+        anyhow!("A file must contain a symbol table")
+    }
+
+    fn multiple_symbol_tables() -> Error {
+        anyhow!("File contains more than one relocation table")
+    }
+
+    fn no_mapping() -> Error {
+        anyhow!("Cannot find input section mapping. Something went wrong.")
     }
 }

@@ -1,14 +1,13 @@
 /* Stage 4. Perform relocations. */
 
-use std::io::Result as IoResult;
-use std::io::{Error, ErrorKind};
+use anyhow::{anyhow, bail, Error, Result};
 use vec_map::VecDict;
 
 use crate::elf_file::{ElfRelaAdapter, ElfRelaEntry, ElfSymtabEntry};
 use crate::elf_file::{R_X86_64_32S, R_X86_64_64, R_X86_64_PC32};
 use crate::elf_file::{SHT_PROGBITS, STN_UNDEF};
 use crate::misc::write_ne_at_pos;
-use crate::misc::{FileToken, InpSectToken};
+use crate::misc::{ErrorCollection, FileToken, InpSectToken};
 use crate::processing_stage_1::{InpSectFileMapping, PreprocessedFile};
 use crate::processing_stage_2::{Symbol, SymbolMap};
 use crate::processing_stage_3::FinalLayout;
@@ -16,7 +15,7 @@ use crate::processing_stage_3::FinalLayout;
 type SectionContent = Vec<u8>;
 
 struct SectionRelocationData<'a> {
-    file: &'a PreprocessedFile,
+    file: &'a PreprocessedFile<'a>,
     layout: &'a FinalLayout<'a>,
     inpsect_token: InpSectToken,
     rela_token: Option<InpSectToken>,
@@ -53,7 +52,7 @@ impl<'a> SectionRelocationData<'a> {
         }
     }
 
-    fn relocate_section(&self) -> IoResult<SectionContent> {
+    fn relocate_section(&self) -> Result<SectionContent> {
         let InpSectToken(inpsect_num) = self.inpsect_token;
         let section = self.file.content.get_section_entry(inpsect_num as u16)?;
 
@@ -69,12 +68,7 @@ impl<'a> SectionRelocationData<'a> {
         };
 
         if section.sh_type != SHT_PROGBITS {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "Something went wrong. Trying to relocate section, which is not SHT_PROGBITS\n"
-                ),
-            ));
+            return Err(ErrorCollection::relocating_wrong_section());
         }
 
         let InpSectToken(rela_num) = rela_token;
@@ -86,9 +80,6 @@ impl<'a> SectionRelocationData<'a> {
             let entry: &ElfRelaEntry = rela.get(i)?;
             let symbol: &ElfSymtabEntry = rela.symtab.get(entry.r_info_sym as u64)?;
 
-            let e = |desc: String| Err(Error::new(ErrorKind::InvalidData, desc));
-            let inpsect_token = InpSectToken(symbol.st_shndx as usize);
-
             let symbol =
                 /* Symbol in .rela has direct link to .symtab */
                 if symbol.st_shndx != STN_UNDEF {
@@ -99,10 +90,7 @@ impl<'a> SectionRelocationData<'a> {
 
                     match self.symbol_map.get(name) {
                         None => {
-                            let FileToken(file_number) = self.file.token;
-                            /* TODO: better diagnostics (file name) */
-                            return e(format!("Undefined symbol {} referenced in a file \
-                                              with number {}", name, file_number));
+                            return Err(ErrorCollection::wrong_symbol(name, self.file.filename));
                         }
                         Some(symbol) => symbol.value().clone()
                     }
@@ -131,8 +119,7 @@ impl<'a> SectionRelocationData<'a> {
                 R_X86_64_32S => {
                     let value_signed: i64 = bytemuck::cast(value);
                     let value_trimmed = i32::try_from(value_signed).map_err(|_| {
-                        Error::new(
-                            ErrorKind::InvalidData,
+                        anyhow!(
                             "R_X86_64_32S relocation requested, \
                             but the symbol address cannot be sign-extended from 32 bits",
                         )
@@ -150,8 +137,7 @@ impl<'a> SectionRelocationData<'a> {
                 /* PC relative 32 bit signed */
                 R_X86_64_PC32 => {
                     let get_error = |_| {
-                        Error::new(
-                            ErrorKind::InvalidData,
+                        anyhow!(
                             "R_X86_64_PC32 relocation requested, \
                             but the relative symbol address cannot be sign-extended from 32 bits",
                         )
@@ -178,10 +164,7 @@ impl<'a> SectionRelocationData<'a> {
                 }
 
                 _ => {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        "Requested relocation type is not implemented yet",
-                    ))
+                    bail!("Some relocation type requested in input file is not implemented yet")
                 }
             };
         }
@@ -192,7 +175,7 @@ impl<'a> SectionRelocationData<'a> {
 
 #[derive(Debug)]
 pub struct RelocatedFile<'a> {
-    pub preprocessed: &'a PreprocessedFile,
+    pub preprocessed: &'a PreprocessedFile<'a>,
     pub inpsects: VecDict<InpSectToken, SectionContent>,
 }
 
@@ -201,11 +184,11 @@ impl<'a> RelocatedFile<'a> {
         file: &'a PreprocessedFile,
         layout: &FinalLayout,
         symbol_map: &SymbolMap,
-    ) -> IoResult<Self> {
+    ) -> Result<Self> {
         let inpsect_count = file.inpsect_to_outsect.capacity();
         let mut inpsects = VecDict::new(file.inpsect_to_rela.capacity());
 
-        (0..inpsect_count).try_for_each::<_, IoResult<()>>(|num| {
+        (0..inpsect_count).try_for_each::<_, Result<()>>(|num| {
             let token = InpSectToken(num);
             let rela_token = file.inpsect_to_rela.get(&InpSectToken(num)).cloned();
 
@@ -226,5 +209,19 @@ impl<'a> RelocatedFile<'a> {
             preprocessed: file,
             inpsects,
         })
+    }
+}
+
+impl ErrorCollection {
+    fn relocating_wrong_section() -> Error {
+        anyhow!("Something went wrong. Trying to relocate section, which is not SHT_PROGBITS\n")
+    }
+
+    fn wrong_symbol(name: &str, filename: &str) -> Error {
+        anyhow!(
+            "Undefined symbol `{}` referenced in `{}` input file",
+            name,
+            filename
+        )
     }
 }

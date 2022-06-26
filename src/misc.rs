@@ -105,3 +105,5 @@ impl Permissions {
         flags
     }
 }
+
+pub struct ErrorCollection {}
