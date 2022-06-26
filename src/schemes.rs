@@ -76,7 +76,7 @@ pub struct OutSectScheme<'a> {
 
 #[derive(Debug)]
 pub struct SegmentScheme<'a> {
-    pub name: &'a str,         /* Segment name */
+    pub name: &'a str,     /* Segment name */
     pub start: AddrScheme, /* Starting address of segment */
     pub alignment: u64,    /* Segment alignment (in bytes) */
     pub sections: &'a [OutSectScheme<'a>],

@@ -165,6 +165,7 @@ fn link(output_filename: &str, input_filenames: Vec<&String>) -> Result<()> {
 
 fn main() -> Result<(), anyhow::Error> {
     let matches = Command::new("clingy")
+        .color(clap::ColorChoice::Never)
         .about("simple linker for elf")
         .arg(arg!(output: -o --output <output_file> "output filename"))
         .arg(arg!(input: <input_file> ... "input filenames"))
