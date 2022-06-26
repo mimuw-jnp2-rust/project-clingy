@@ -7,7 +7,7 @@
  ----------------
 
  Sometimes all you need as a key is just a wrapper over `usize`. In that case you can use
- macros from the `vec_map-derive` crate (they require `!` helper).
+ macros from the `vec_map-derive` crate (they require `macro_rules!` helper).
 
  ```rust
  use custom_derive::custom_derive;
@@ -27,90 +27,28 @@
  range known at compile-time, thus enabling stack-allocation of the map.
 */
 
+pub mod tok_iter;
+
 use std::marker::PhantomData;
 use std::ops::{Index, IndexMut};
 
+pub enum Entry<'a, K: 'a, V: 'a> {
+    Occupied(OccupiedEntry<'a, K, V>),
+    Vacant(VacantEntry<'a, K, V>),
+}
+
+pub struct OccupiedEntry<'a, K: 'a, V: 'a> {
+    key: &'a K,
+    value: &'a V,
+}
+
+pub struct VacantEntry<'a, K: 'a, V: 'a> {
+    key: &'a K,
+    value: &'a V,
+}
+
 pub trait NumericIndex {
     fn get_numeric_index(&self) -> usize;
-}
-
-pub trait Token {
-    fn from_numeric_index(index: usize) -> Self;
-}
-
-use std::iter::{Enumerate, Filter};
-use std::slice::Iter as SliceIter;
-use std::slice::IterMut as SliceIterMut;
-
-fn is_none_mut<V>(item: &(usize, &mut Option<V>)) -> bool {
-    item.1.is_some()
-}
-
-fn is_none<V>(item: &(usize, &Option<V>)) -> bool {
-    item.1.is_some()
-}
-
-type FilterPredicate<V> = fn(&(usize, &Option<V>)) -> bool;
-type FilterPredicateMut<V> = fn(&(usize, &mut Option<V>)) -> bool;
-
-type InternalIterType<'a, V> =
-    Filter<Enumerate<SliceIter<'a, Option<V>>>, FilterPredicate<V>>;
-type InternalIterMutType<'a, V> =
-    Filter<Enumerate<SliceIterMut<'a, Option<V>>>, FilterPredicateMut<V>>;
-
-#[derive(Clone)]
-pub struct TokIter<'a, K, V>
-where
-    K: 'a + Token + NumericIndex,
-    V: 'a,
-{
-    iter: InternalIterType<'a, V>,
-    phantom: PhantomData<K>,
-}
-
-pub struct TokIterMut<'a, K, V>
-where
-    K: 'a + Token + NumericIndex,
-    V: 'a,
-{
-    iter: InternalIterMutType<'a, V>,
-    phantom: PhantomData<K>,
-}
-
-impl<'a, K, V> Iterator for TokIter<'a, K, V>
-where
-    K: 'a + Token + NumericIndex,
-    V: 'a,
-{
-    type Item = (K, &'a V);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.iter.next() {
-            Some((index, value)) => {
-                let key = K::from_numeric_index(index);
-                Some((key, value.as_ref().unwrap()))
-            }
-            None => None,
-        }
-    }
-}
-
-impl<'a, K, V> Iterator for TokIterMut<'a, K, V>
-where
-    K: 'a + Token + NumericIndex,
-    V: 'a,
-{
-    type Item = (K, &'a mut V);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.iter.next() {
-            Some((index, value)) => {
-                let key = K::from_numeric_index(index);
-                Some((key, value.as_mut().unwrap()))
-            }
-            None => None,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -141,8 +79,12 @@ where
         self.vector.resize_with(size, || None);
     }
 
-    pub fn len(&self) -> usize {
+    pub fn capacity(&self) -> usize {
         self.vector.len()
+    }
+
+    pub fn len(&self) -> usize {
+        self.vector.iter().filter(|slot| slot.is_some()).count()
     }
 
     pub fn resize(&mut self, size: usize) {
@@ -173,26 +115,6 @@ where
 
     pub fn remove(&mut self, key: &K) {
         self.vector[key.get_numeric_index()] = None;
-    }
-
-    pub fn tok_iter(&self) -> TokIter<K, V>
-    where
-        K: Token,
-    {
-        TokIter {
-            iter: self.vector.iter().enumerate().filter(is_none),
-            phantom: PhantomData,
-        }
-    }
-
-    pub fn tok_iter_mut(&mut self) -> TokIterMut<K, V>
-    where
-        K: Token,
-    {
-        TokIterMut {
-            iter: self.vector.iter_mut().enumerate().filter(is_none_mut),
-            phantom: PhantomData,
-        }
     }
 }
 

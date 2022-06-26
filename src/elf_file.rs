@@ -3,6 +3,8 @@ use bytemuck_derive::{Pod, Zeroable};
 use std::ffi::CStr;
 use std::io::{Error, ErrorKind, Read, Result as IoResult};
 
+use crate::misc::Permissions;
+
 /* Reading data from file.
  *
  * For all the structs loaded directly from ELF file, we are using official member names, even if
@@ -151,9 +153,9 @@ pub const SHT_RELA: u32 = 4;
 pub const SHT_NOBITS: u32 = 8;
 
 /* ...and section flags. */
-const SHF_WRITE: u32 = 1 << 0;
+pub const SHF_WRITE: u32 = 1 << 0;
 const SHF_ALLOC: u32 = 1 << 1;
-const SHF_EXECINSTR: u32 = 1 << 2;
+pub const SHF_EXECINSTR: u32 = 1 << 2;
 const SHF_MERGE: u32 = 1 << 4;
 const SHF_STRINGS: u32 = 1 << 5;
 const SHF_INFO_LINK: u32 = 1 << 6;
@@ -165,7 +167,7 @@ const SHF_GROUP: u32 = 1 << 9;
 pub struct ElfSectionEntry {
     pub sh_name: u32,
     pub sh_type: u32,  /* see SHT_* constants */
-    sh_flags: u64, /* see SHF_* constants */
+    pub sh_flags: u64, /* see SHF_* constants */
     sh_addr: ElfAddr,
     pub sh_offset: ElfOffset,
     pub sh_size: u64,

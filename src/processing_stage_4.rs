@@ -10,7 +10,7 @@ use crate::elf_file::{SHT_PROGBITS, STN_UNDEF};
 use crate::misc::write_ne_at_pos;
 use crate::misc::{FileToken, InpSectToken};
 use crate::processing_stage_1::{InpSectFileMapping, PreprocessedFile};
-use crate::processing_stage_2::{Symbol, SymbolMap, SymbolVisibility};
+use crate::processing_stage_2::{Symbol, SymbolMap};
 use crate::processing_stage_3::FinalLayout;
 
 type SectionContent = Vec<u8>;
@@ -202,8 +202,8 @@ impl<'a> RelocatedFile<'a> {
         layout: &FinalLayout,
         symbol_map: &SymbolMap,
     ) -> IoResult<Self> {
-        let inpsect_count = file.inpsect_to_outsect.len();
-        let mut inpsects = VecDict::new(file.inpsect_to_rela.len());
+        let inpsect_count = file.inpsect_to_outsect.capacity();
+        let mut inpsects = VecDict::new(file.inpsect_to_rela.capacity());
 
         (0..inpsect_count).try_for_each::<_, IoResult<()>>(|num| {
             let token = InpSectToken(num);

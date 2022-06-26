@@ -5,6 +5,7 @@ use std::io::{Error, ErrorKind};
 use vec_map::VecDict;
 
 use crate::misc::Align;
+use crate::misc::Permissions;
 use crate::misc::{FileToken, OutSectToken, SegmentToken};
 use crate::processing_stage_1::{Layout, PreprocessedFile};
 use crate::processing_stage_2::{Symbol, SymbolOffset};
@@ -16,6 +17,7 @@ pub struct FinalSegment {
     pub virtmem_size: u64,
     pub virtmem_address: u64,
     pub offset_in_output_file: u64,
+    pub permissions: Permissions,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,7 @@ pub struct FinalOutSect {
     pub progbits_virtmem_address: u64,
     pub nobits_virtmem_address: u64,
     pub offset_in_output_file: u64,
+    pub permissions: Permissions,
 }
 
 #[derive(Debug)]
@@ -68,7 +71,7 @@ fn append_empty_outsects<'a>(
     layout: &'a Layout<'a>,
     preprocessed_files: &'a Vec<PreprocessedFile>,
 ) -> FinalOutSects {
-    let files_count = preprocessed_files.len();
+    let files_count = preprocessed_files.capacity();
     let mut final_outsects = FinalOutSects::new(layout.outsect_count);
 
     let is_outsect_present_in_any_file = |token: &OutSectToken| -> bool {
@@ -87,6 +90,7 @@ fn append_empty_outsects<'a>(
                 progbits_virtmem_address: 0,
                 nobits_virtmem_address: 0,
                 offset_in_output_file: 0,
+                permissions: Permissions::default(),
             },
         );
     };
@@ -114,18 +118,17 @@ fn append_input_file_slots<'a>(
             relative_offset_progbits.align_inplace(16); /* TODO: proper alignment */
             relative_offset_nobits.align_inplace(16); /* TODO: proper alignment */
 
-            outsect
-                .input_file_slots_offsets
-                .insert(
-                    &file.token,
-                    SlotsOffset {
-                        progbits: relative_offset_progbits,
-                        nobits: relative_offset_nobits,
-                    },
-                );
+            outsect.input_file_slots_offsets.insert(
+                &file.token,
+                SlotsOffset {
+                    progbits: relative_offset_progbits,
+                    nobits: relative_offset_nobits,
+                },
+            );
 
             relative_offset_progbits += file.outsects_this_file[&outsect_token].progbits;
             relative_offset_nobits += file.outsects_this_file[&outsect_token].nobits;
+            outsect.permissions |= file.outsects_this_file[&outsect_token].permissions;
         }
 
         outsect.progbits_size = relative_offset_progbits;
@@ -179,6 +182,7 @@ pub fn fix_layout<'a>(
         let offset_in_output_file = current_offset_in_file;
         let mut any_outsect_present_in_segment = false;
 
+        let mut segment_permissions = Permissions::default();
         let outsect_base = outsect_num;
         outsect_num += segment.sections.len();
 
@@ -193,14 +197,16 @@ pub fn fix_layout<'a>(
                 None => continue,
             };
 
-            current_address.align_inplace(16); /* TODO: proper alignment */
-            current_offset_in_file.align_inplace(16); /* TODO: proper alignment */
+            if next_outsect.progbits_size != 0 {
+                current_address.align_inplace(16); /* TODO: proper alignment */
+                current_offset_in_file.align_inplace(16); /* TODO: proper alignment */
 
-            next_outsect.progbits_virtmem_address = current_address;
-            next_outsect.offset_in_output_file = current_offset_in_file;
+                next_outsect.progbits_virtmem_address = current_address;
+                next_outsect.offset_in_output_file = current_offset_in_file;
 
-            current_address += next_outsect.progbits_size;
-            current_offset_in_file += next_outsect.progbits_size;
+                current_address += next_outsect.progbits_size;
+                current_offset_in_file += next_outsect.progbits_size;
+            }
         }
 
         for (outsect_index, _) in segment.sections.iter().enumerate() {
@@ -214,9 +220,13 @@ pub fn fix_layout<'a>(
                 None => continue,
             };
 
-            current_address.align_inplace(16);
-            next_outsect.nobits_virtmem_address = current_address;
-            current_address += next_outsect.nobits_size;
+            if next_outsect.nobits_size != 0 {
+                current_address.align_inplace(16);
+                next_outsect.nobits_virtmem_address = current_address;
+                current_address += next_outsect.nobits_size;
+            }
+
+            segment_permissions |= next_outsect.permissions;
         }
 
         if any_outsect_present_in_segment {
@@ -227,6 +237,7 @@ pub fn fix_layout<'a>(
                     virtmem_size: current_address - virtmem_address,
                     virtmem_address,
                     offset_in_output_file,
+                    permissions: segment_permissions,
                 },
             );
         }

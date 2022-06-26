@@ -73,7 +73,7 @@ pub enum AddrScheme {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SectType {
-    NoBits, /* no file-backed */
+    NoBits,   /* no file-backed */
     ProgBits, /* file-backed */
 }
 

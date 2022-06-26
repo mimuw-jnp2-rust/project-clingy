@@ -5,13 +5,12 @@ use std::io::{Error, ErrorKind, Seek, SeekFrom, Write};
 
 use crate::elf_file::PT_LOAD;
 use crate::elf_file::{ElfHeader, ElfProgramHeaderEntry};
-use crate::elf_file::{PF_EXEC, PF_READ, PF_WRITE};
 use crate::misc::{Align, SegmentToken};
 use crate::schemes::MAXPAGESIZE;
 
 use crate::processing_stage_1::InpSectFileMapping;
 use crate::processing_stage_2::SymbolMap;
-use crate::processing_stage_3::{FinalLayout, FinalOutSect};
+use crate::processing_stage_3::FinalLayout;
 use crate::processing_stage_4::RelocatedFile;
 
 pub fn generate_output_executable(
@@ -90,15 +89,13 @@ pub fn generate_output_executable(
     content_writer.seek(SeekFrom::Start(0))?;
     content_writer.write_all(bytemuck::bytes_of(&elf_header))?;
 
-    let segment_iter = layout.final_segments.tok_iter();
-
-    for (token, segment) in segment_iter {
+    for (token, segment) in layout.final_segments.tok_iter() {
         let SegmentToken(index) = token;
         let scheme = &layout.layout.scheme.segments[index];
 
         let elf_program_header_entry = crate::elf_file::ElfProgramHeaderEntry {
             p_type: PT_LOAD,
-            p_flags: PF_EXEC | PF_WRITE | PF_READ, /* uhh that's really bad, URGENT TODO */
+            p_flags: segment.permissions.to_elf_pf(),
             p_offset: segment.offset_in_output_file,
             p_vaddr: segment.virtmem_address,
             p_paddr: segment.virtmem_address,
@@ -115,10 +112,10 @@ pub fn generate_output_executable(
 
     for file in relocated_files {
         for (token, section_content) in file.inpsects.tok_iter() {
-                let mapping = match file.preprocessed.inpsect_to_outsect.get(&token) {
-                    Some(mapping) => mapping,
-                    None => continue,
-                };
+            let mapping = match file.preprocessed.inpsect_to_outsect.get(&token) {
+                Some(mapping) => mapping,
+                None => continue,
+            };
 
             match mapping {
                 InpSectFileMapping::ProgBits(token, inpsect_this_file_offset) => {

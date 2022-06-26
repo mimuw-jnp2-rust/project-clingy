@@ -112,7 +112,7 @@ pub fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap
                         "Strong symbol `{}` is defined multiple times.",
                         name
                     )),
-                    _ => unreachable!()
+                    _ => unreachable!(),
                 }
             }
         }

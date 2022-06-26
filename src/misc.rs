@@ -1,6 +1,11 @@
+use crate::elf_file::ElfSectionEntry;
+use crate::elf_file::{PF_EXEC, PF_READ, PF_WRITE};
+use crate::elf_file::{SHF_EXECINSTR, SHF_WRITE};
+use bitflags::bitflags;
+
 pub trait Align {
-     fn align(&self, bound: Self) -> Self;
-     fn align_inplace(&mut self, bound: Self);
+    fn align(&self, bound: Self) -> Self;
+    fn align_inplace(&mut self, bound: Self);
 }
 
 impl Align for u64 {
@@ -13,8 +18,8 @@ impl Align for u64 {
     }
 }
 
-use vec_map_derive::{Token, NumericIndex};
 use std::io::Result as IoResult;
+use vec_map_derive::{NumericIndex, Token};
 
 macro_attr! {
     #[derive(Token!, NumericIndex!, Debug, Clone, Copy)]
@@ -61,3 +66,42 @@ where
     val.write_ne_bytes(writer)
 }
 
+bitflags! {
+    #[derive(Default)]
+    pub struct Permissions: u8 {
+        const R = 0b001;
+        const W = 0b010;
+        const X = 0b100;
+    }
+}
+
+impl Permissions {
+    pub fn from_elf_shf(entry: &ElfSectionEntry) -> Self {
+        let mut perm = Permissions::R;
+
+        if entry.sh_flags & SHF_WRITE as u64 != 0 {
+            perm |= Permissions::W;
+        }
+        if entry.sh_flags & SHF_EXECINSTR as u64 != 0 {
+            perm |= Permissions::X;
+        }
+
+        perm
+    }
+
+    pub fn to_elf_pf(&self) -> u32 {
+        let mut flags: u32 = 0;
+
+        if self.contains(Permissions::R) {
+            flags |= PF_READ;
+        }
+        if self.contains(Permissions::W) {
+            flags |= PF_WRITE;
+        }
+        if self.contains(Permissions::X) {
+            flags |= PF_EXEC;
+        }
+
+        flags
+    }
+}

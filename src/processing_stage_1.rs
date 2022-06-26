@@ -14,8 +14,8 @@ use vec_map::VecDict;
 
 use crate::elf_file::{ElfFileContent, ElfSectionEntry, ElfStringTableAdapter};
 use crate::elf_file::{SHT_NOBITS, SHT_NULL, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB};
-
 use crate::misc::Align;
+use crate::misc::Permissions;
 use crate::misc::{FileToken, InpSectToken, OutSectToken};
 use crate::schemes::{LayoutScheme, OutSectScheme};
 
@@ -112,14 +112,15 @@ pub enum InpSectFileMapping {
     NoBits(OutSectToken, u64),
 }
 
-#[derive(Clone, Debug)]
-pub struct OutSectThisFileSize {
+#[derive(Default, Clone, Debug)]
+pub struct OutSectThisFileInfo {
     pub progbits: u64,
     pub nobits: u64,
+    pub permissions: Permissions,
 }
 
 type InpSectToOutSect = VecDict<InpSectToken, InpSectFileMapping>;
-type OutSectThisFileSizes = VecDict<OutSectToken, OutSectThisFileSize>;
+type OutSectThisFile = VecDict<OutSectToken, OutSectThisFileInfo>;
 type InpSectToRela = VecDict<InpSectToken, InpSectToken>;
 
 #[derive(Debug)]
@@ -129,73 +130,47 @@ pub struct PreprocessedFile {
     pub symtab_token: InpSectToken,
     pub inpsect_to_outsect: InpSectToOutSect,
     pub inpsect_to_rela: InpSectToRela,
-    pub outsects_this_file: OutSectThisFileSizes,
+    pub outsects_this_file: OutSectThisFile,
 }
 
 impl PreprocessedFile {
-    fn map_progbits_to_outsect(
+    fn map_inpsect_to_outsect(
         inpsect_token: InpSectToken,
         outsect_token: OutSectToken,
-        inpsect_size: u64,
-        outsects_this_file: &mut OutSectThisFileSizes,
+        inpsect_entry: &ElfSectionEntry,
+        outsects_this_file: &mut OutSectThisFile,
         inpsect_to_outsect: &mut InpSectToOutSect,
     ) {
         if let None = outsects_this_file.get(&outsect_token) {
-            outsects_this_file.insert(
-                &outsect_token,
-                OutSectThisFileSize {
-                    progbits: 0,
-                    nobits: 0,
-                },
-            )
+            outsects_this_file.insert(&outsect_token, OutSectThisFileInfo::default())
         }
 
-        let current_outsect_offset = outsects_this_file[&outsect_token].progbits;
+        outsects_this_file[&outsect_token].permissions |= Permissions::from_elf_shf(inpsect_entry);
+
+        let current_outsect_offset = match inpsect_entry.sh_type {
+            SHT_PROGBITS => &mut outsects_this_file[&outsect_token].progbits,
+            SHT_NOBITS => &mut outsects_this_file[&outsect_token].nobits,
+            _ => unreachable!(),
+        };
 
         /* TODO: Alignment. Right now we are aligning to the nearest multiple of 16. Use
          * real alignment field from InpSect. */
         let offset_aligned = current_outsect_offset.align(16);
+        *current_outsect_offset = offset_aligned + inpsect_entry.sh_size;
 
         inpsect_to_outsect.insert(
             &inpsect_token,
-            InpSectFileMapping::ProgBits(outsect_token, offset_aligned),
-        );
-
-        outsects_this_file[&outsect_token].progbits = offset_aligned + inpsect_size;
-    }
-
-    fn map_nobits_to_outsect(
-        inpsect_token: InpSectToken,
-        outsect_token: OutSectToken,
-        inpsect_size: u64,
-        outsects_this_file: &mut OutSectThisFileSizes,
-        inpsect_to_outsect: &mut InpSectToOutSect,
-    ) {
-        if let None = outsects_this_file.get(&outsect_token) {
-            outsects_this_file.insert(
-                &outsect_token,
-                OutSectThisFileSize {
-                    progbits: 0,
-                    nobits: 0,
-                },
-            )
-        }
-
-        let current_outsect_offset = outsects_this_file[&outsect_token].nobits;
-
-        /* TODO: Alignment. Right now we are aligning to the nearest multiple of 16. Use
-         * real alignment field from InpSect. */
-        let offset_aligned = current_outsect_offset.align(16);
-
-        inpsect_to_outsect.insert(
-            &inpsect_token,
-            InpSectFileMapping::NoBits(outsect_token, offset_aligned),
+            match inpsect_entry.sh_type {
+                SHT_PROGBITS => InpSectFileMapping::ProgBits(outsect_token, offset_aligned),
+                SHT_NOBITS => InpSectFileMapping::NoBits(outsect_token, offset_aligned),
+                _ => unreachable!(),
+            },
         );
     }
 
     pub fn new(file: &mut std::fs::File, number: usize, layout: &Layout) -> IoResult<Self> {
         let content = ElfFileContent::read(file)?;
-        let mut outsects_this_file = OutSectThisFileSizes::new(layout.outsect_count);
+        let mut outsects_this_file = OutSectThisFile::new(layout.outsect_count);
 
         let header = content.get_elf_header()?;
         let section_names = ElfStringTableAdapter::adapt(header.e_shstrndx, &content)?;
@@ -235,26 +210,14 @@ impl PreprocessedFile {
                         }
                     }
                 }
-                SHT_PROGBITS => {
+                SHT_PROGBITS | SHT_NOBITS => {
                     let name = section_names.get(section.sh_name)?;
                     let outsect_token = layout.match_inpsect_with_err(name)?;
 
-                    PreprocessedFile::map_progbits_to_outsect(
+                    PreprocessedFile::map_inpsect_to_outsect(
                         token,
                         outsect_token,
-                        section.sh_size,
-                        &mut outsects_this_file,
-                        &mut inpsect_to_outsect,
-                    );
-                }
-                SHT_NOBITS => {
-                    let name = section_names.get(section.sh_name)?;
-                    let outsect_token = layout.match_inpsect_with_err(name)?;
-
-                    PreprocessedFile::map_nobits_to_outsect(
-                        token,
-                        outsect_token,
-                        section.sh_size,
+                        section,
                         &mut outsects_this_file,
                         &mut inpsect_to_outsect,
                     );

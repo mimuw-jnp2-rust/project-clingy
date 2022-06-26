@@ -1,28 +1,30 @@
 #![feature(cstr_from_bytes_until_nul)]
 #![feature(io_error_more)]
 #![feature(mixed_integer_ops)]
-#[macro_use] extern crate macro_attr;
+#[macro_use]
+extern crate macro_attr;
 
 mod elf_file;
 mod misc;
-mod schemes;
 mod processing_stage_1;
 mod processing_stage_2;
 mod processing_stage_3;
 mod processing_stage_4;
 mod processing_stage_5;
+mod schemes;
 
 use std::io::Write;
-use crate::schemes::DEFAULT_SCHEME;
-use crate::processing_stage_1::{PreprocessedFile, Layout};
-use crate::processing_stage_2::{SymbolMap, process_symbols_from_file};
+
+use crate::processing_stage_1::{Layout, PreprocessedFile};
+use crate::processing_stage_2::{process_symbols_from_file, SymbolMap};
 use crate::processing_stage_3::fix_layout;
 use crate::processing_stage_4::RelocatedFile;
 use crate::processing_stage_5::generate_output_executable;
+use crate::schemes::DEFAULT_SCHEME;
 
+use rayon::iter::IndexedParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
-use rayon::iter::IndexedParallelIterator;
 
 fn main() {
     let default_layout: Layout = Layout::new(&DEFAULT_SCHEME).unwrap();

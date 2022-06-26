@@ -1,7 +1,7 @@
 #[macro_export]
 macro_rules! Token {
     (() $(pub)* struct $name:ident(pub usize);) => {
-        impl vec_map::Token for $name {
+        impl vec_map::tok_iter::Token for $name {
             fn from_numeric_index(v: usize) -> Self {
                 $name(v)
             }
@@ -9,7 +9,7 @@ macro_rules! Token {
     };
 
     (() $(pub)* struct $name:ident(usize);) => {
-        impl vec_map::Token for $name {
+        impl vec_map::tok_iter::Token for $name {
             fn from_numeric_index(v: usize) -> Self {
                 $name(v)
             }
