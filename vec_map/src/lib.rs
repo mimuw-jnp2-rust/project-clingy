@@ -32,21 +32,6 @@ pub mod tok_iter;
 use std::marker::PhantomData;
 use std::ops::{Index, IndexMut};
 
-pub enum Entry<'a, K: 'a, V: 'a> {
-    Occupied(OccupiedEntry<'a, K, V>),
-    Vacant(VacantEntry<'a, K, V>),
-}
-
-pub struct OccupiedEntry<'a, K: 'a, V: 'a> {
-    key: &'a K,
-    value: &'a V,
-}
-
-pub struct VacantEntry<'a, K: 'a, V: 'a> {
-    key: &'a K,
-    value: &'a V,
-}
-
 pub trait NumericIndex {
     fn get_numeric_index(&self) -> usize;
 }

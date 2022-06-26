@@ -7,9 +7,9 @@
  * provided LayoutScheme, computing the size occupied in every OutSect by this file).
  */
 
+use anyhow::{anyhow, Error, Result};
 use std::fmt::Display;
 use vec_map::VecDict;
-use anyhow::{Error, Result, anyhow};
 
 use crate::elf_file::{ElfFileContent, ElfSectionEntry, ElfStringTableAdapter};
 use crate::elf_file::{SHT_NOBITS, SHT_NULL, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB};
@@ -155,7 +155,12 @@ impl<'a> PreprocessedFile<'a> {
         );
     }
 
-    pub fn new(filename: &'a str, file: &mut std::fs::File, number: usize, layout: &Layout) -> Result<Self> {
+    pub fn new(
+        filename: &'a str,
+        file: &mut std::fs::File,
+        number: usize,
+        layout: &Layout,
+    ) -> Result<Self> {
         let content = ElfFileContent::read(file)?;
         let mut outsects_this_file = OutSectThisFile::new(layout.outsect_count);
 
@@ -239,12 +244,12 @@ impl<'a> PreprocessedFile<'a> {
         }
     }
 
-    pub fn get_inpsect_file_mapping(&self,  token: InpSectToken) -> Result<&InpSectFileMapping> {
-        self.inpsect_to_outsect.get(&token).ok_or_else(ErrorCollection::no_mapping)
+    pub fn get_inpsect_file_mapping(&self, token: InpSectToken) -> Result<&InpSectFileMapping> {
+        self.inpsect_to_outsect
+            .get(&token)
+            .ok_or_else(ErrorCollection::no_mapping)
     }
 }
-
-pub enum PreprocessingError {}
 
 impl ErrorCollection {
     fn glob<Payload: Display>(name: &str, payload: &Payload) -> Error {

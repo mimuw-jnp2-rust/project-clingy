@@ -7,7 +7,7 @@ use crate::elf_file::{ElfRelaAdapter, ElfRelaEntry, ElfSymtabEntry};
 use crate::elf_file::{R_X86_64_32S, R_X86_64_64, R_X86_64_PC32};
 use crate::elf_file::{SHT_PROGBITS, STN_UNDEF};
 use crate::misc::write_ne_at_pos;
-use crate::misc::{ErrorCollection, FileToken, InpSectToken};
+use crate::misc::{ErrorCollection, InpSectToken};
 use crate::processing_stage_1::{InpSectFileMapping, PreprocessedFile};
 use crate::processing_stage_2::{Symbol, SymbolMap};
 use crate::processing_stage_3::FinalLayout;

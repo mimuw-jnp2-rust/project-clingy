@@ -73,11 +73,6 @@ impl Symbol {
     }
 }
 
-struct InpSectRelativeAddress {
-    outsect_num: u16,
-    offset: u64,
-}
-
 pub fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap) -> Result<()> {
     let InpSectToken(symtab_index) = file.symtab_token;
     let symtab = ElfSymtabAdapter::adapt(symtab_index as u16, &file.content)?;
@@ -124,7 +119,7 @@ pub fn process_symbols_from_file(file: &PreprocessedFile, symbol_map: &SymbolMap
             STB_GLOBAL | STB_WEAK => append_global_symbol(symbol)?,
             _ => {
                 let name = symtab.strtab.get(symbol.st_name).unwrap_or("");
-                return Err(ErrorCollection::unrecognized_symbol_bind(name))
+                return Err(ErrorCollection::unrecognized_symbol_bind(name));
             }
         }
     }

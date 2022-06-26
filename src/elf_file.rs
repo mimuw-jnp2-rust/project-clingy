@@ -3,8 +3,6 @@ use bytemuck_derive::{Pod, Zeroable};
 use std::ffi::CStr;
 use std::io::{Error, ErrorKind, Read, Result as IoResult};
 
-use crate::misc::Permissions;
-
 /* Reading data from file.
  *
  * For all the structs loaded directly from ELF file, we are using official member names, even if
@@ -72,7 +70,6 @@ impl ElfFileContent {
 /* Type aliases from ELF specification (Elf64_*). */
 type ElfAddr = u64; /* Type of addresses. */
 type ElfOffset = u64; /* Type of file offsets.  */
-type ElfVerSym = u16; /* Type of version symbol. */
 type ElfSectionIndex = u16; /* Type of... */
 
 #[derive(Copy, Clone, Zeroable, Pod, Debug)]
@@ -154,12 +151,12 @@ pub const SHT_NOBITS: u32 = 8;
 
 /* ...and section flags. */
 pub const SHF_WRITE: u32 = 1 << 0;
-const SHF_ALLOC: u32 = 1 << 1;
+/* const SHF_ALLOC: u32 = 1 << 1; */
 pub const SHF_EXECINSTR: u32 = 1 << 2;
-const SHF_MERGE: u32 = 1 << 4;
-const SHF_STRINGS: u32 = 1 << 5;
-const SHF_INFO_LINK: u32 = 1 << 6;
-const SHF_GROUP: u32 = 1 << 9;
+/* const SHF_MERGE: u32 = 1 << 4;
+ * const SHF_STRINGS: u32 = 1 << 5;
+ * const SHF_INFO_LINK: u32 = 1 << 6;
+ * const SHF_GROUP: u32 = 1 << 9; */
 
 /* ELF section header entry. */
 #[derive(Copy, Clone, Zeroable, Pod, Debug)]
@@ -177,7 +174,7 @@ pub struct ElfSectionEntry {
     sh_entsize: u64,
 }
 
-pub const PT_NULL: u32 = 0; /* Program header table entry unused */
+/* pub const PT_NULL: u32 = 0; /* Program header table entry unused */ */
 pub const PT_LOAD: u32 = 1; /* Loadable program segment */
 
 pub const PF_EXEC: u32 = 1 << 0; /* Segment is executable */
@@ -212,9 +209,11 @@ pub struct ElfSymtabEntry {
 
 /* Bit flipping makes my heart melt */
 impl ElfSymtabEntry {
+    /*
     pub fn get_stt(&self) -> u8 {
         self.st_info & 0xf
     }
+    */
     pub fn get_stb(&self) -> u8 {
         self.st_info >> 4
     }
@@ -226,6 +225,7 @@ pub const STB_LOCAL: u8 = 0; /* Local symbol */
 pub const STB_GLOBAL: u8 = 1; /* Global symbol */
 pub const STB_WEAK: u8 = 2; /* Weak symbol */
 
+/*
 pub const STT_NOTYPE: u8 = 0; /* Symbol type is unspecified */
 pub const STT_OBJECT: u8 = 1; /* Symbol is a data object */
 pub const STT_FUNC: u8 = 2; /* Symbol is a code object */
@@ -233,6 +233,7 @@ pub const STT_SECTION: u8 = 3; /* Symbol associated with a section */
 pub const STT_FILE: u8 = 4; /* Symbol's name is file name */
 pub const STT_COMMON: u8 = 5; /* Symbol is a common data object */
 pub const STT_TLS: u8 = 6; /* Symbol is thread-local data object*/
+*/
 
 /* ELF .rela. entry. */
 #[derive(Copy, Clone, Zeroable, Pod, Debug)]

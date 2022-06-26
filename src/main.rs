@@ -5,7 +5,7 @@
 extern crate macro_attr;
 extern crate clap;
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{anyhow, Error, Result};
 use clap::{arg, Command};
 
 mod elf_file;
@@ -88,7 +88,7 @@ fn run_stage_2(preprocessed_files: &Vec<PreprocessedFile>) -> Result<SymbolMap> 
 
     let symbol_map: SymbolMap = SymbolMap::new();
 
-    let result = preprocessed_files.par_iter().try_for_each(|file| {
+    preprocessed_files.par_iter().try_for_each(|file| {
         process_symbols_from_file(file, &symbol_map)
             .map_err(|e| ErrorCollection::processing_symbols(file.filename, e))
     })?;
@@ -141,7 +141,8 @@ fn run_stage_5<'a>(
         .map_err(Error::new)
         .map_err(|e| ErrorCollection::output_final_executable(output_filename, e))?;
 
-    output_file.write_all(&output)
+    output_file
+        .write_all(&output)
         .map_err(Error::new)
         .map_err(|e| ErrorCollection::output_final_executable(output_filename, e))
 }

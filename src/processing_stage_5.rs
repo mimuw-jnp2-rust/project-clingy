@@ -36,9 +36,11 @@ pub fn generate_output_executable(
         );
     }
 
+    let entry_point = layout.layout.scheme.entry;
+
     let start = symbol_map
-        .get("_start")
-        .ok_or_else(|| anyhow!("Cannot find `_start` symbol"))?
+        .get(entry_point)
+        .ok_or_else(|| anyhow!("Cannot find `{}` entry point", entry_point))?
         .value()
         .get_symbol_address(layout);
 

@@ -62,19 +62,10 @@ pub const DEFAULT_SCHEME: LayoutScheme<'static> = LayoutScheme {
  *
  */
 
-type FileIndex = u16;
-type SegmentIndex = u16;
-
 #[derive(Debug)]
 pub enum AddrScheme {
     CurrentLocation,
     Absolute(u64),
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum SectType {
-    NoBits,   /* no file-backed */
-    ProgBits, /* file-backed */
 }
 
 #[derive(Debug)]
@@ -85,7 +76,7 @@ pub struct OutSectScheme<'a> {
 
 #[derive(Debug)]
 pub struct SegmentScheme<'a> {
-    name: &'a str,         /* Segment name */
+    pub name: &'a str,         /* Segment name */
     pub start: AddrScheme, /* Starting address of segment */
     pub alignment: u64,    /* Segment alignment (in bytes) */
     pub sections: &'a [OutSectScheme<'a>],
@@ -93,7 +84,7 @@ pub struct SegmentScheme<'a> {
 
 #[derive(Debug)]
 pub struct LayoutScheme<'a> {
-    entry: &'a str,
+    pub entry: &'a str,
     pub segments: &'a [SegmentScheme<'a>],
 }
 

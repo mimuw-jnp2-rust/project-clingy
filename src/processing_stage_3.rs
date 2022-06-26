@@ -1,6 +1,6 @@
 /* Stage 3. Fix virtual memory layout. Assign addresses to every Segment and OutSect. */
 
-use anyhow::{anyhow, bail, Error, Result};
+use anyhow::{bail, Result};
 use vec_map::VecDict;
 
 use crate::misc::Align;
